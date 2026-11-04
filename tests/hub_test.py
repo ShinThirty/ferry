@@ -161,6 +161,19 @@ def has(x, sha) -> bool:
     return mg(x, "source", "cat-file", "-e", sha).code == 0
 
 
+def stored(x, sha) -> int:                  # bytes git took to store an object of source
+    out = mg(x, "source", "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objectsize:disk)")
+    return int(dict(line.split() for line in out.split("\n"))[sha])
+
+
+def drops(out, sha) -> bool:
+    """Whether a compaction on A says it dropped that blob. Checked against git's
+    own figure for it rather than a number, since that turns on the zlib git has:
+    zlib-ng's fastest level, the one for loose objects, makes random bytes 5% bigger."""
+    said = re.search(r"compacted — ([\d.]+) MB", out)
+    return said is not None and abs(float(said[1]) - stored("A", sha) / 2**20) < 0.1
+
+
 def slot(x, r) -> int:                      # KB in a machine's slot for a repo
     return sum(f.stat().st_size for f in (H / x / r).iterdir()) // 1024
 
@@ -346,7 +359,7 @@ def compaction() -> None:
     (src("A") / "big1.bin").unlink(missing_ok=True); m("A", "sync"); m("B", "pull")
     write(src("C") / "c.txt", "c-local")
     out = m("A", "compact")
-    check("A compacts source, skips memory/personal", lambda: "compacted — 2.9 MB" in out and "memory: already compact" in out)
+    check("A compacts source, skips memory/personal", lambda: drops(out, big) and "memory: already compact" in out)
     check("A slot is small", lambda: slot("A", "source") < 50)
     check("... and starts from a commit every machine can build", lambda: mg("A", "source", "log", "-1", "--format=%an %ae %cn %ce") == "ferry ferry@epoch ferry ferry@epoch")
     check("lock released", lambda: not (H / ".compacting-source").is_dir())
@@ -388,10 +401,10 @@ def compaction() -> None:
     tmp3 = mg("A", "source", "rev-parse", "HEAD:tmp3.bin")
     (src("A") / "tmp3.bin").unlink(missing_ok=True)
     out = m("A", "sync")
-    check("default threshold: no compaction for 2.9 MB", lambda: "compacted" not in out)
+    check("default threshold: no compaction for 3 MB", lambda: "compacted" not in out)
     append(src("A") / "a.txt", "t")
     out = m("A", "sync", FERRY_COMPACT_MB="1")
-    check("FERRY_COMPACT_MB=1: compacts on its own", lambda: "compacted — 2.9 MB" in out)
+    check("FERRY_COMPACT_MB=1: compacts on its own", lambda: drops(out, tmp3))
     out = m("B", "pull", "--hook", FERRY_FOREGROUND_MB="1")
     check("B's session start defers the 4.8 MB", lambda: "downloading in the background" in out)
     settle("B"); time.sleep(2); settle("B")
