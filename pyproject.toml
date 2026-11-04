@@ -1,0 +1,20 @@
+[project]
+name = "ferry"
+version = "0.1.0"
+description = "Keep a project's git repos in step across machines through an encrypted folder on a shared drive, with no git server"
+readme = "README.md"
+authors = [
+    { name = "Lingnan Liu" }
+]
+requires-python = ">=3.12"
+dependencies = ["pyrage>=1.4,<2"]
+
+[project.urls]
+Repository = "https://github.com/ShinThirty/ferry"
+
+[project.scripts]
+ferry = "ferry.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
