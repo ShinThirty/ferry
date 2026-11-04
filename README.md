@@ -205,3 +205,7 @@ FERRY_TEST_SHARE=DIR tests/hub_test.sh          # the hubs in a folder on a real
 Only `gitcli` runs git, only `crypto` touches age, and the decisions with no
 I/O in them are in `plan`. The unit tests hold those rules. Every machine
 reads the hub, so a change to its format needs a new `FORMAT`.
+
+## License
+
+MIT, in `LICENSE`.

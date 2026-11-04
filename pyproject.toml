@@ -3,6 +3,8 @@ name = "ferry"
 version = "0.1.0"
 description = "Keep a project's git repos in step across machines through an encrypted folder on a shared drive, with no git server"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Lingnan Liu" }
 ]
