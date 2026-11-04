@@ -3,7 +3,7 @@ the key file, and the layering rules. uv run python -m unittest discover tests
 runs them.
 
 These cover what can be checked without a hub. ferry's behaviour end to end —
-machines, a share, compaction — is tests/hub_test.sh.
+machines, a share, compaction — is tests/hub_test.py.
 """
 import ast
 import os

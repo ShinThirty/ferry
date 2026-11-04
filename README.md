@@ -197,9 +197,9 @@ on Windows set your editor to LF. Other notes:
 ## Developing
 
 ```sh
-uv run python -m unittest discover -s tests     # seconds
-tests/hub_test.sh                               # machines and hubs, about 75 s
-FERRY_TEST_SHARE=DIR tests/hub_test.sh          # the hubs in a folder on a real share
+uv run python -m unittest discover -s tests            # seconds
+uv run python tests/hub_test.py                        # machines and hubs, a few minutes
+FERRY_TEST_SHARE=DIR uv run python tests/hub_test.py   # the hubs in a folder on a real share
 ```
 
 Only `gitcli` runs git, only `crypto` touches age, and the decisions with no
