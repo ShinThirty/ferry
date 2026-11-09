@@ -142,12 +142,17 @@ pull at session start and push at session end:
 {
   "hooks": {
     "SessionStart": [{"matcher": "startup|resume", "hooks": [
-      {"type": "command", "command": "ferry -C \"$CLAUDE_PROJECT_DIR\" pull --hook", "timeout": 150}]}],
+      {"type": "command", "command": "ferry", "args": ["-C", "${CLAUDE_PROJECT_DIR}", "pull", "--hook"], "timeout": 150}]}],
     "SessionEnd": [{"hooks": [
-      {"type": "command", "command": "ferry -C \"$CLAUDE_PROJECT_DIR\" push --background"}]}]
+      {"type": "command", "command": "ferry", "args": ["-C", "${CLAUDE_PROJECT_DIR}", "push", "--background"]}]}]
   }
 }
 ```
+
+With `args`, Claude Code runs ferry itself, with no shell, and fills in
+`${CLAUDE_PROJECT_DIR}`, the same on every platform. Written as one command
+string instead, a hook runs in PowerShell on Windows without Git Bash, which
+doesn't expand `$CLAUDE_PROJECT_DIR`.
 
 `pull --hook` reports into the session and never fails it. Away from the hub,
 commits stay local, and session start says so and lists what isn't on the
