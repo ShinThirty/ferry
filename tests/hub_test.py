@@ -15,6 +15,7 @@ the prefix goes after a clean run.
 
 Part 1 is the everyday: enroll, chains, hooks, merges, conflicts, budgets, an
 unreachable hub, rekey, retire, a move to a new hub. Part 2 is compaction.
+Part 3 is a root ferry doesn't sync, which has a remote of its own.
 Each prints PASS/FAIL per check; the temp dir is kept when anything fails.
 
 The standard library only: ferry runs as installed, never imported here, and
@@ -636,6 +637,40 @@ def compaction() -> None:
     check("status shows the epoch", lambda: says(out, "compacted ", "(epoch 4)"))
 
 
+# --- part 3: a root with a remote of its own -------------------------------------
+def own_remote() -> None:
+    """sync-root = false: root travels by its own remote (here a bare repo in the
+    temp dir, as GitHub would be), and ferry carries only the other repos."""
+    A, origin = R("A"), T / "origin.git"
+    mkdir(T / "A" / "home", T / "A" / "conf", A)
+    write(A / "ferry.toml", 'name = "proj"', 'sync-root = false', '[repos.memory]', 'claude-memory = true',
+          'auto = true', '[repos.source]', 'path = "source"', 'auto = true')
+    write(A / ".gitignore", "source/", ".ferry/")
+    gx("A", "init", "-q", A); gx("A", "-C", A, "config", "user.email", "t@t")
+    gx("A", "-C", A, "add", "-A"); gx("A", "-C", A, "commit", "-qm", "init")
+    gx("A", "init", "-q", "--bare", origin); gx("A", "-C", A, "push", "-q", origin, "HEAD")
+    mkdir(src("A"), memdir("A")); write(src("A") / "a.txt", "alpha"); write(memdir("A") / "MEMORY.md", "- one")
+    out = m("A", "init", "--hub", H, "--host", "A")
+    check("init leaves root to its own remote", lambda: says(out, "root: not synced", "clone it there first")
+          and not H.exists("A/root") and on("A", "git", "-C", A, "config", "core.hooksPath").code == 1)
+
+    mkdir(T / "B" / "home", key("B")); shutil.copyfile(key("A") / "identity", key("B") / "identity")
+    out = on("B", FERRY, "enroll", "proj", "--hub", H, "--dest", R("B"), "--host", "B")
+    check("enroll without a clone says to make one", lambda: says(out, "no machine has published the root repo", "pass the clone as --dest"))
+    rmtree(R("B")); gx("B", "clone", "-q", origin, R("B"))
+    mkdir(memdir("B")); write(memdir("B") / "MEMORY.md", "- stale")
+    out = on("B", FERRY, "enroll", "proj", "--hub", H, "--dest", R("B"), "--host", "B")
+    check("enroll fills in a clone of root", lambda: "B is enrolled" in out and same(src("A"), src("B"))
+          and read(memdir("B") / "MEMORY.md") == "- one" and any(memdir("B").parent.glob("memory.pre-ferry-*")))
+
+    write(A / "notes.md", "n"); gx("A", "-C", A, "add", "notes.md"); gx("A", "-C", A, "commit", "-qm", "notes")
+    write(src("A") / "b.txt", "beta"); m("A", "sync"); out = m("B", "sync")
+    check("sync carries the rest, and never root", lambda: (src("B") / "b.txt").is_file() and not (R("B") / "notes.md").exists()
+          and "root ←" not in out and "root →" not in out and not H.exists("A/root"))
+    out = m("B", "status")
+    check("status says root isn't synced", lambda: says(out, "root", "not synced — it has a remote of its own", "source "))
+
+
 if __name__ == "__main__":
     sys.stdout.reconfigure(errors="replace")
     TOOL = Path(__file__).resolve().parent.parent
@@ -669,7 +704,8 @@ if __name__ == "__main__":
             sys.exit(f"no AWS credentials to test with — {e}")
         print(f"hubs in S3: {HUBS}")
 
-    for part, T, H in ((everyday, ROOT / "daily", hub_at("daily-hub")), (compaction, ROOT / "compact", hub_at("compact-hub"))):
+    for part, T, H in ((everyday, ROOT / "daily", hub_at("daily-hub")), (compaction, ROOT / "compact", hub_at("compact-hub")),
+                       (own_remote, ROOT / "remote", hub_at("remote-hub"))):
         try:
             part()
         except Exception:

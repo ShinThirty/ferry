@@ -55,6 +55,11 @@ and root's `.gitignore` must ignore that folder and `.ferry/`. `init` checks
 for both, and `status` warns if either changes later. ferry runs from the
 project folder or any folder under it, or with `-C DIR`.
 
+Root is kept too, unless `ferry.toml` says `sync-root = false`. Then root's
+history travels by a remote of its own, as a repo on GitHub does, and ferry
+leaves it alone: no slot on the hub, no hook. The folder is still the
+project, and root must still ignore the other repos' folders and `.ferry/`.
+
 ## Machines
 
 On the first machine, with the share mounted:
@@ -73,7 +78,9 @@ ferry enroll notes --hub /Volumes/share/notes-hub --dest ~/notes
 
 `--hub` is the hub's folder as the share is mounted on that machine, and
 `--dest` is the folder the project goes in, which must be empty or not exist
-yet. Where the share is
+yet. Where ferry doesn't sync root, clone it first and pass the clone as
+`--dest`: enroll fills in the other repos around it, moving aside any auto
+repo's folder it finds there. Where the share is
 mounted differs from machine to machine, so each one keeps its own path to the
 hub, in `.ferry/hub`. `ferry hub` shows it, and `ferry hub DIR` changes it if
 the share moves. `git clone` won't set up

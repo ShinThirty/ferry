@@ -96,6 +96,13 @@ class ProjectFile(unittest.TestCase):
     def test_root_alone(self):
         self.assertEqual(self.parse('name = "x"').names, ["root"])
 
+    def test_root_with_a_remote_of_its_own(self):
+        p = self.parse('name = "x"\nsync-root = false\n' + EXAMPLE.split("\n", 2)[2])
+        self.assertEqual((p.names, p.kept, p.syncs_root), (["lab", "memory", "files"], ["lab"], False))
+        self.assertTrue(self.parse(EXAMPLE).syncs_root)
+        lay = Layout(Path("/p/notes"), p)
+        self.assertEqual((lay.worktree("root"), lay.gitdir("root")), (Path("/p/notes"), Path("/p/notes/.git")))
+
     def test_mistakes_are_named(self):
         cases = {
             '': "name",
@@ -103,6 +110,8 @@ class ProjectFile(unittest.TestCase):
             'name = "x"\nhub = "/h"': "unknown key 'hub'",
             'name = "x"\ncolour = 1': "unknown key 'colour'",
             'name = "x"\n[repos.root]\npath = "r"': "needs no [repos.root]",
+            'name = "x"\nsync-root = "no"': "sync-root is true or false",
+            'name = "x"\nsync-root = false': "nothing to sync",
             'name = "x"\n[repos."a b"]\npath = "r"': "letters, digits",
             'name = "x"\n[repos.a]\npath = "a"\nauto = "yes"': "true or false",
             'name = "x"\n[repos.a]\npath = "a"\ncolour = 1': "unknown key 'colour'",

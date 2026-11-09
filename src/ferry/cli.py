@@ -35,7 +35,8 @@ holding ferry.toml, or any folder under it, or the one -C DIR names.
   ferry init --hub DIR [--host NAME]     make a hub: the first machine, or the
                                          first to move the project to a new one
   ferry enroll PROJECT --hub DIR --dest DIR [--host NAME]
-                                         every other machine
+                                         every other machine; DIR is empty, or
+                                         a clone of a root ferry doesn't sync
   ferry hub [DIR]                        the hub's folder as this machine mounts
                                          it, or a new one: a remount, or a move
   ferry compact [REPO...]                compact auto repos now, whatever the size
@@ -267,6 +268,8 @@ class Run:
             ui.warn("hub not reachable — comparing against what was last fetched")
         w = max(11, *(len(n) + 2 for n in s.project.names))
         pad = " " * (w + 2)
+        if not s.project.syncs_root:
+            ui.info(f"{ROOT:<{w}}not synced — it has a remote of its own")
         for n in s.project.names:
             if not s.have(n):
                 ui.info(f"{n:<{w}}not set up here")
@@ -363,7 +366,10 @@ class Run:
             if g.resolve("HEAD") is None:
                 g.commit(f"sync: start on {host}", allow_empty=True)
             ui.ok(f"{n}: {g.tracked_count()} file(s) from {s.layout.worktree(n)}")
-        ui.ok(f"{', '.join(proj.kept)}: each commit pushes, through a post-commit hook")
+        if proj.kept:
+            ui.ok(f"{', '.join(proj.kept)}: each commit pushes, through a post-commit hook")
+        if not proj.syncs_root:
+            ui.ok(f"{ROOT}: not synced — its history travels by a remote of its own")
 
         ui.hdr(f"push → {hub.location}/{host}")
         s.push()
@@ -389,6 +395,8 @@ ferry installed and AWS credentials for the bucket:
      — AirDrop, USB or scp, never via the bucket
   2. ferry enroll {proj.name} --hub {hub.location} --dest DIR, DIR being the
      folder {proj.name} goes in""")
+        if not proj.syncs_root:
+            print("\nferry doesn't carry root, so clone it there first, and pass the clone as DIR.")
         return 0
 
     def cmd_enroll(self, args: Sequence[str]) -> int:
@@ -418,23 +426,26 @@ ferry installed and AWS credentials for the bucket:
             self.die(f"no hub at {hub.location} — {hub.missing_hint}")
         if Hub(hub, host, keys).has_host(host):
             self.die(f"the hub already has a machine named {host} — pass --host NAME, or retire {host} first if this machine replaces it")
-        if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        proj = self.clone_at(dest, name)
+        if proj is None and dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
             self.die(f"{dest} exists and is not empty — move it aside first")
         dest.mkdir(parents=True, exist_ok=True)
         folder = dest.resolve()
 
-        # Root first: its ferry.toml says what else the project holds.
         ui.hdr(f"copying from {hub.location}")
-        self.copy(self.engine(Layout(folder, Project.bare(name)), hub, host, keys), ROOT)
-        try:
-            proj = Project.load(folder)
-        except ProjectError as e:
-            self.die(f"{e} — root came from the hub without a ferry.toml ferry can use")
-        if proj.name != name:
-            self.die(f"the hub at {hub.location} holds the project {proj.name}, not {name}")
+        if proj is None:
+            # Root first: its ferry.toml says what else the project holds.
+            self.copy(self.engine(Layout(folder, Project.bare(name)), hub, host, keys), ROOT)
+            try:
+                proj = Project.load(folder)
+            except ProjectError as e:
+                self.die(f"{e} — root came from the hub without a ferry.toml ferry can use")
+            if proj.name != name:
+                self.die(f"the hub at {hub.location} holds the project {proj.name}, not {name}")
         s = self.engine(Layout(folder, proj), hub, host, keys)
-        for n in proj.names[1:]:
-            self.copy(s, n)
+        for n in proj.names:
+            if n != ROOT:
+                self.copy(s, n)
         Config(host, folder).write(m.config)
         self.begin(s)
         s.use_hub()
@@ -446,13 +457,42 @@ ferry installed and AWS credentials for the bucket:
         print(f"\n{host} is enrolled: {name} is at {folder}.")
         return 0
 
+    def clone_at(self, dest: Path, name: str) -> Project | None:
+        """The project in dest, when dest is a clone of a root ferry doesn't sync:
+        enroll then fills in the other repos around it. None for anything else,
+        which must be empty, as ever."""
+        if not (dest / project.FILE).is_file():
+            return None
+        try:
+            proj = Project.load(dest)
+        except ProjectError as e:
+            self.die(str(e))
+        if proj.syncs_root:
+            return None
+        if proj.name != name:
+            self.die(f"{dest} holds the project {proj.name}, not {name}")
+        if not (dest / ".git").is_dir():
+            self.die(f"no git repo at {dest} — clone root there, with its .git")
+        layout = Layout(dest.resolve(), proj)
+        if loose := unignored(layout):
+            self.die(f"root doesn't ignore {', '.join(p + '/' for p in loose)} — add them to its .gitignore, "
+                     "or root would carry their files")
+        # An auto repo's folder found there is moved aside as it is copied, but a
+        # kept repo's would be reset onto the hub's copy, losing what's in it.
+        for n in proj.kept:
+            w = layout.worktree(n)
+            if w.exists() and (not w.is_dir() or any(w.iterdir())):
+                self.die(f"{w} exists and is not empty — move it aside first; enroll brings {n} from the hub")
+        return proj
+
     def copy(self, s: Sync, n: str) -> None:
         """Repo n, from the machine that wrote it last. The pull that ends enroll
         then takes whatever the others hold beyond that, which is usually nothing."""
         h, ui = s.newest(n), self.ui
         if h is None:
             if n == ROOT:
-                self.die("no machine has published the root repo yet")
+                self.die("no machine has published the root repo yet — where ferry doesn't sync it "
+                         "(sync-root = false), clone it and pass the clone as --dest")
             ui.warn(f"{n}: no machine has published it — skipped")
             return
         w, g = s.layout.worktree(n), s.git(n)

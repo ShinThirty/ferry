@@ -28,6 +28,12 @@ A repo is kept (the default) or auto:
         folder. union names files whose merges keep both sides' lines.
 
 Root must ignore .ferry/ and every repo folder inside the project.
+
+Root is kept, unless ferry.toml says sync-root = false: then its history
+travels by a remote of its own (a repo on GitHub, say), and ferry gives it no
+slot on the hub and no hook. The folder is still the project, and root must
+still ignore what the other repos hold. A new machine clones root first, and
+enroll fills in the rest around it.
 """
 from __future__ import annotations
 
@@ -91,7 +97,7 @@ class Repo:
 @dataclass(frozen=True)
 class Project:
     name: str
-    repos: tuple[Repo, ...]         # root first, then in ferry.toml's order
+    repos: tuple[Repo, ...]         # root first if ferry syncs it, then in ferry.toml's order
 
     @classmethod
     def bare(cls, name: str) -> Project:
@@ -114,15 +120,18 @@ class Project:
         def bad(msg: str) -> ProjectError:
             return ProjectError(f"{where}: {msg}")
 
-        if extra := set(data) - {"name", "repos"}:
+        if extra := set(data) - {"name", "sync-root", "repos"}:
             raise bad(f"unknown key '{min(extra)}'")
         name = data.get("name")
         if not isinstance(name, str) or not valid_name(name):
             raise bad("name = \"...\" is needed: letters, digits, . _ - (it names this project's folder in ~/.config/ferry)")
+        sync_root = data.get("sync-root", True)
+        if not isinstance(sync_root, bool):
+            raise bad("sync-root is true or false")
         tables = data.get("repos", {})
         if not isinstance(tables, dict):
             raise bad("repos must be tables, [repos.NAME]")
-        repos = [Repo(ROOT)]
+        repos = [Repo(ROOT)] if sync_root else []
         for n, t in tables.items():
             where_n = f"[repos.{n}]"
             if n == ROOT:
@@ -150,6 +159,8 @@ class Project:
                 path = "/".join(parts)
             repos.append(Repo(n, auto, path or "", memory, tuple(union)))
 
+        if not repos:
+            raise bad("sync-root = false and no [repos.NAME] leaves ferry nothing to sync")
         if sum(r.claude_memory for r in repos) > 1:
             raise bad("only one repo can be Claude's memory folder")
         paths = [r.path for r in repos if r.path]
@@ -171,6 +182,10 @@ class Project:
     def kept(self) -> list[str]:
         return [r.name for r in self.repos if not r.auto]
 
+    @property
+    def syncs_root(self) -> bool:
+        return ROOT in self.names
+
     def repo(self, name: str) -> Repo:
         for r in self.repos:
             if r.name == name:
@@ -189,9 +204,9 @@ class Layout:
         return self.folder / STATE
 
     def worktree(self, name: str) -> Path:
-        r = self.project.repo(name)
-        if r.name == ROOT:
+        if name == ROOT:                    # synced or not: what the other repos sit in
             return self.folder
+        r = self.project.repo(name)
         if r.claude_memory:
             return home() / ".claude" / "projects" / claude_slug(str(self.folder)) / "memory"
         return self.folder.joinpath(*r.path.split("/"))
@@ -199,6 +214,8 @@ class Layout:
     def gitdir(self, name: str) -> Path:
         """The auto repos keep theirs in .ferry/, outside their work trees, so no
         .git ever lands inside Claude's memory folder or a folder of plain files."""
+        if name == ROOT:
+            return self.folder / ".git"
         return self.state / f"{name}.git" if self.project.repo(name).auto else self.worktree(name) / ".git"
 
     @property
