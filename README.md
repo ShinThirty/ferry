@@ -1,8 +1,8 @@
 # ferry
 
 ferry keeps a project's git repos in step across your machines through a
-folder on a shared drive, such as a home NAS. It encrypts end to end with
-[age](https://age-encryption.org), so the folder only ever holds
+folder on a shared drive, such as a home NAS, or an S3 bucket. It encrypts
+end to end with [age](https://age-encryption.org), so the hub only ever holds
 ciphertext. There is no git server, no git remote and no daemon. Each machine
 owns one slot on the hub and writes nothing outside it, so no two machines
 ever write the same file.
@@ -91,6 +91,39 @@ is lost.
    doesn't see the moved machines' work, so don't compact until every machine
    has moved. The old hub can go once the last one has.
 
+## A hub in S3
+
+`--hub s3://BUCKET/PREFIX` puts the hub under a prefix in an S3 bucket, the
+same on every machine. That needs ferry's s3 extra:
+
+```sh
+uv tool install 'ferry[s3] @ git+https://github.com/ShinThirty/ferry'
+```
+
+Make the bucket first: ferry makes nothing outside the prefix. Each machine
+needs AWS credentials where the AWS CLI finds them (`aws configure`,
+`AWS_PROFILE`, `AWS_REGION`), allowed:
+
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+   "Resource": "arn:aws:s3:::BUCKET"},
+  {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+   "Resource": "arn:aws:s3:::BUCKET/PREFIX/*"}]}
+```
+
+The hooks run in the environment Claude Code and git were started with, so
+a profile named only in one shell's `AWS_PROFILE` may not reach them; the
+default profile always does. When S3 can't be reached, ferry works from local
+state just as when a share is away. Credentials that won't do, or have run
+out, fail the run instead, and a session start says why.
+
+Everything is age ciphertext before it is uploaded, as on a share. With the
+bucket's versioning on, the packs a push replaces stay as old versions, so add
+a lifecycle rule that expires noncurrent versions, and one that aborts
+incomplete multipart uploads after a day. A quiet pull is a few dozen small
+requests; over a slow link, lower `FERRY_FOREGROUND_MB` (below) too.
+
 ## Day to day
 
 Each commit in a kept repo pushes in the background. ferry points those repos'
@@ -141,8 +174,9 @@ ferry retire HOST
 ferry rekey
 ```
 
-`--background` returns at once and logs to `.ferry/log`. A machine's name
-defaults to its host name.
+`DIR` after `--hub`, and the hub `ferry hub` takes, may be `s3://BUCKET/PREFIX`
+as well. `--background` returns at once and logs to `.ferry/log`. A
+machine's name defaults to its host name.
 
 ## How it works
 
@@ -204,8 +238,9 @@ FERRY_TEST_SHARE=DIR uv run python tests/hub_test.py   # the hubs in a folder on
 
 Only `gitcli` runs git, only `crypto` touches age, and the decisions with no
 I/O in them are in `plan`. The unit tests hold those rules. Only `store`
-touches the hub's files, and `StoreContract` in the unit tests is what any
-kind of store must do. Every machine reads the hub, so a change to its format
+touches the hub's files, and only `s3` touches AWS. `StoreContract` in the
+unit tests is what any kind of store must do. The unit tests run the S3 store
+against moto, in process; `hub_test.py` runs hubs in folders only. Every machine reads the hub, so a change to its format
 needs a new `FORMAT`.
 
 ## License

@@ -17,6 +17,12 @@ Repository = "https://github.com/ShinThirty/ferry"
 [project.scripts]
 ferry = "ferry.cli:main"
 
+[project.optional-dependencies]
+s3 = ["boto3>=1.36,<2"]             # a hub in S3
+
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["moto[s3]>=5.1,<6"]          # S3, in-process, for the unit tests

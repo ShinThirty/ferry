@@ -54,8 +54,13 @@ class Hub:
     # --- the hub as a whole --------------------------------------------------
     def is_up(self) -> bool:
         """FORMAT is the proof the share is mounted. An unmounted mount point can
-        still exist as an empty local directory, and syncing into that would look fine."""
-        fmt = self._text("FORMAT")
+        still exist as an empty local directory, and syncing into that would look
+        fine. A hub that can't be reached is down too; one set up wrong (a missing
+        bucket, credentials that won't do) is a StoreError, not down."""
+        try:
+            fmt = self._text("FORMAT")
+        except ConnectionError:
+            return False
         if fmt is None:
             return False
         fmt = fmt.rstrip("\n")

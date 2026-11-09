@@ -9,11 +9,15 @@ the hub whole files only, and lists only those:
   writing   a local path to fill; the file appears whole once it's done, or not at all
   claim     a file made only if no machine has made it yet: the compaction lock
 
-FolderStore is a folder on a shared drive. Every file is written beside its
-target as .<name>.part and renamed, so a reader gets the whole file or none of
-it. A share that can't hold extended attributes gets a ._<name> companion from
-macOS beside every file and folder (AppleDouble). The client renames and
-deletes those along with their file; listings here skip them.
+A store that can't reach the hub raises ConnectionError, which hub takes for
+the hub being down.
+
+FolderStore keeps the files in a folder on a shared drive, and S3Store (in s3)
+in an S3 bucket. On a share, every file is written beside its target as
+.<name>.part and renamed, so a reader gets the whole file or none of it. A
+share that can't hold extended attributes gets a ._<name> companion from macOS
+beside every file and folder (AppleDouble). The client renames and deletes
+those along with their file; listings here skip them.
 """
 from __future__ import annotations
 
@@ -41,9 +45,13 @@ class Stat:
 
 class Store(ABC):
     """A hub's files, wherever they are kept. location is what this machine
-    calls the hub: what .ferry/hub holds, and what ferry says."""
+    calls the hub: what .ferry/hub holds, and what ferry says. mounted is
+    whether it is reached through a mount, whose path differs from machine to
+    machine. missing_hint is what to check when no hub is found there."""
 
     location: str
+    mounted: bool
+    missing_hint: str
 
     @abstractmethod
     def check_vacant(self) -> None:
@@ -102,7 +110,16 @@ class Store(ABC):
 
 
 def store_at(location: str) -> Store:
-    """The store a hub's location names."""
+    """The store a hub's location names: s3://BUCKET/PREFIX, or a folder."""
+    if location.startswith("s3://"):
+        try:
+            from .s3 import S3Store                 # boto3 is an extra, loaded only for a hub in S3
+        except ModuleNotFoundError as e:
+            if (e.name or "").split(".")[0] not in ("boto3", "botocore", "s3transfer"):
+                raise
+            raise StoreError("a hub in S3 needs boto3, which comes with ferry's s3 extra: "
+                             "uv tool install 'ferry[s3] @ git+https://github.com/ShinThirty/ferry'") from e
+        return S3Store.at(location)
     return FolderStore(Path(location).absolute())
 
 
@@ -112,6 +129,9 @@ def _partial(name: str) -> bool:
 
 class FolderStore(Store):
     """A folder on a shared drive, as this machine mounts it."""
+
+    mounted = True
+    missing_hint = "is the share mounted, and is that the hub's folder on it?"
 
     def __init__(self, root: Path):
         self.root = root

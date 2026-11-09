@@ -13,13 +13,23 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ferry import plan, system
 from ferry.crypto import Keyring, generate_key
 from ferry.hub import Hub, HubFormatError
 from ferry.manifest import Epoch, EpochRecord, Manifest, Pack
 from ferry.project import Layout, Project, ProjectError, claude_slug, find
-from ferry.store import FolderStore, Store, StoreError
+from ferry.store import FolderStore, Store, StoreError, store_at
+
+try:                                        # the s3 extra, and moto from the dev group
+    import boto3
+    from botocore.config import Config
+    from moto import mock_aws
+
+    from ferry.s3 import S3Store
+except ModuleNotFoundError:
+    S3Store = None
 from ferry.ui import human
 
 LIB = Path(__file__).resolve().parent.parent / "src" / "ferry"
@@ -319,6 +329,102 @@ class FolderStoreContract(StoreContract, unittest.TestCase):
         self.tmp.cleanup()
 
 
+class MockS3:
+    """A bucket in moto's S3, in this process: nothing leaves the machine, and
+    no AWS setting of the user's is read."""
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "testing", "AWS_SECRET_ACCESS_KEY": "testing",
+                                           "AWS_REGION": "us-east-1", "AWS_DEFAULT_REGION": "us-east-1"})
+        env.start()
+        self.addCleanup(env.stop)
+        for k in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"):
+            os.environ.pop(k, None)
+        aws = mock_aws()
+        aws.start()
+        self.addCleanup(aws.stop)
+        self.client = boto3.client("s3")
+        self.client.create_bucket(Bucket="ferry-test")
+        self.store = S3Store("ferry-test", "hub/")
+        self.store.mkdir("")
+
+
+@unittest.skipIf(S3Store is None, "needs moto, from the dev group: uv sync")
+class S3StoreContract(MockS3, StoreContract, unittest.TestCase):
+    pass
+
+
+@unittest.skipIf(S3Store is None, "needs moto, from the dev group: uv sync")
+class S3Files(MockS3, unittest.TestCase):
+    def put(self, key: str, data: bytes) -> None:
+        with self.store.writing(key) as f:
+            f.write_bytes(data)
+
+    def test_location(self):
+        self.assertEqual((store_at("s3://b/notes/hub/").location, store_at("s3://b/notes/hub/").prefix),
+                         ("s3://b/notes/hub", "notes/hub/"))
+        self.assertEqual((store_at("s3://b").location, store_at("s3://b").prefix), ("s3://b", ""))
+        with self.assertRaisesRegex(StoreError, "no bucket"):
+            store_at("s3:///notes")
+
+    def test_sig_moves_on_a_rewrite_of_the_same_size(self):
+        self.put("m", b"one")
+        before = self.store.stat("m").sig
+        self.put("m", b"two")
+        self.assertNotEqual(self.store.stat("m").sig, before, "LastModified is whole seconds: the ETag must say")
+
+    def test_a_big_file_goes_up_in_parts(self):
+        data = os.urandom(9 << 20)
+        self.put("big", data)
+        with self.store.reading("big") as f:
+            self.assertEqual(f.read_bytes(), data)
+
+    def test_clean_aborts_uploads_that_died(self):
+        for key in ("hub/a/s/big", "hub/a/s/deeper/big"):
+            self.client.create_multipart_upload(Bucket="ferry-test", Key=key)
+        self.store.clean("a/s")
+        left = self.client.list_multipart_uploads(Bucket="ferry-test").get("Uploads", [])
+        self.assertEqual([u["Key"] for u in left], ["hub/a/s/deeper/big"])
+
+    def test_a_missing_bucket_is_an_error_not_a_hub_thats_down(self):
+        with self.assertRaisesRegex(StoreError, "no bucket nowhere"):
+            Hub(S3Store("nowhere", "hub/"), "alpha", None).is_up()
+        with self.assertRaisesRegex(StoreError, "no bucket nowhere"):
+            S3Store("nowhere", "hub/").check_vacant()
+
+    def test_vacant(self):
+        with self.assertRaisesRegex(StoreError, "isn't empty"):
+            self.store.check_vacant()
+        self.assertIsNone(S3Store("ferry-test", "other/").check_vacant())
+
+    def test_hub(self):
+        alpha, beta = Hub(self.store, "alpha", None), Hub(self.store, "beta", None)
+        self.assertFalse(alpha.is_up())
+        alpha.create()
+        self.assertTrue(alpha.is_up())
+        alpha.join()
+        beta.join()
+        self.assertEqual((alpha.hosts(), alpha.others()), (["alpha", "beta"], ["beta"]))
+        self.assertIsNone(alpha.take_lock("source"))
+        self.assertIsNone(alpha.take_lock("source"), "left from an earlier attempt")
+        self.assertEqual(beta.take_lock("source"), "alpha")
+        self.assertTrue(beta.lock_held("source"))
+        beta.retire("alpha")
+        self.assertEqual((beta.hosts(), beta.lock_held("source")), (["beta"], False))
+
+
+@unittest.skipIf(S3Store is None, "needs moto, from the dev group: uv sync")
+class S3Unreachable(unittest.TestCase):
+    def test_a_hub_that_cant_be_reached_is_down(self):
+        nowhere = boto3.client("s3", endpoint_url="http://127.0.0.1:9", region_name="us-east-1",
+                               aws_access_key_id="x", aws_secret_access_key="x",
+                               config=Config(connect_timeout=1, retries={"max_attempts": 1}))
+        store = S3Store("ferry-test", "hub/", client=nowhere)
+        self.assertFalse(Hub(store, "alpha", None).is_up())
+        with self.assertRaises(ConnectionError):
+            store.stat("FORMAT")
+
+
 class HubFiles(unittest.TestCase):
     """What a real share adds: a ._ companion beside every file, and mtimes finer
     than a second."""
@@ -419,8 +525,9 @@ class ThisMachine(unittest.TestCase):
 
 
 class Layering(unittest.TestCase):
-    """Only gitcli runs git, only crypto touches age, and only they and system
-    start processes — so features never mix with command lines."""
+    """Only gitcli runs git, only crypto touches age, only s3 touches AWS, and
+    only gitcli and system start processes — so features never mix with command
+    lines."""
 
     def imports(self, module: Path) -> set[str]:
         found = set()
@@ -432,7 +539,8 @@ class Layering(unittest.TestCase):
         return found
 
     def test_only_the_wrappers_reach_outside(self):
-        allowed = {"subprocess": {"gitcli.py", "system.py"}, "pyrage": {"crypto.py"}}
+        allowed = {"subprocess": {"gitcli.py", "system.py"}, "pyrage": {"crypto.py"},
+                   "boto3": {"s3.py"}, "botocore": {"s3.py"}}
         for module in sorted(LIB.glob("*.py")):
             if module.name.startswith("._"):    # macOS's AppleDouble companions, on a copy made on a share
                 continue

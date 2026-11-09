@@ -44,6 +44,9 @@ holding ferry.toml, or any folder under it, or the one -C DIR names.
   ferry rekey                            new key; the old one is kept for reading
   ferry --version
 
+HUB, or DIR after --hub, is the hub's folder as the share is mounted on this
+machine, or s3://BUCKET/PREFIX for a hub in S3.
+
 --background returns at once and logs to .ferry/log. The README has the rest:
 ferry.toml, the hooks, and how the hub works."""
 
@@ -95,7 +98,8 @@ class Run:
     def hub_option(self, opts: dict[str, str], command: str) -> Store:
         """Where the share is mounted differs by OS, so each machine names its hub."""
         if "--hub" not in opts:
-            self.die(f"{command} needs --hub DIR: the hub's folder, as the share is mounted on this machine")
+            self.die(f"{command} needs --hub DIR: the hub's folder, as the share is mounted on this machine, "
+                     "or s3://BUCKET/PREFIX")
         return store_at(opts["--hub"])
 
     def check_repo(self, s: Sync, n: str) -> None:
@@ -310,7 +314,7 @@ class Run:
     def cmd_init(self, args: Sequence[str]) -> int:
         """Make a hub, with this machine its first. On a machine that already syncs
         the project that is a move, and each other machine follows with ferry hub."""
-        opts = self.options(args, {"--hub": "a directory", "--host": "a name"}, "init")
+        opts = self.options(args, {"--hub": "a directory or s3://BUCKET/PREFIX", "--host": "a name"}, "init")
         hub, ui = self.hub_option(opts, "init"), self.ui
         self.need_git()
         folder, proj = self.find()
@@ -363,7 +367,8 @@ class Run:
 
         ui.hdr(f"push → {hub.location}/{host}")
         s.push()
-        print(f"""
+        if hub.mounted:
+            print(f"""
 {host} is the first machine on the hub at {hub.location}. A machine that already
 syncs {proj.name} moves onto it with ferry hub DIR, DIR being the hub's
 folder as the share is mounted there. A new one, with the share mounted and
@@ -374,6 +379,16 @@ ferry installed:
   2. ferry enroll {proj.name} --hub HUB --dest DIR, HUB being the hub's
      folder as the share is mounted there, and DIR the folder {proj.name}
      goes in""")
+        else:
+            print(f"""
+{host} is the first machine on the hub at {hub.location}. A machine that already
+syncs {proj.name} moves onto it with ferry hub {hub.location}. A new one, with
+ferry installed and AWS credentials for the bucket:
+
+  1. copy {m.key} to ~/.config/ferry/{proj.name}/ there
+     — AirDrop, USB or scp, never via the bucket
+  2. ferry enroll {proj.name} --hub {hub.location} --dest DIR, DIR being the
+     folder {proj.name} goes in""")
         return 0
 
     def cmd_enroll(self, args: Sequence[str]) -> int:
@@ -382,7 +397,8 @@ ferry installed:
         name = args[0]
         if not valid_name(name):
             self.die(f"not a project name: {name}")
-        opts = self.options(args[1:], {"--hub": "a directory", "--host": "a name", "--dest": "a directory"}, "enroll")
+        opts = self.options(args[1:], {"--hub": "a directory or s3://BUCKET/PREFIX", "--host": "a name",
+                                       "--dest": "a directory"}, "enroll")
         hub, host = self.hub_option(opts, "enroll"), opts.get("--host") or system.default_host()
         if "--dest" not in opts:
             self.die(f"enroll needs --dest DIR: the folder {name} goes in, empty or not there yet")
@@ -399,7 +415,7 @@ ferry installed:
             self.die(f"no key at {m.key} — copy it from a machine that syncs {name} (AirDrop, USB or scp; not via the share)")
         keys = Keyring.load(m.dir)
         if not Hub(hub, host, keys).is_up():
-            self.die(f"no hub at {hub.location} — is the share mounted, and is that the hub's folder on it?")
+            self.die(f"no hub at {hub.location} — {hub.missing_hint}")
         if Hub(hub, host, keys).has_host(host):
             self.die(f"the hub already has a machine named {host} — pass --host NAME, or retire {host} first if this machine replaces it")
         if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
@@ -475,8 +491,7 @@ ferry installed:
         hub, ui = store_at(args[0]), self.ui
         s = self.load(hub)
         if not s.hub.is_up():
-            self.die(f"no hub at {hub.location} — is the share mounted, and is that the hub's folder? "
-                     "(ferry init --hub DIR makes a new one)")
+            self.die(f"no hub at {hub.location} — {hub.missing_hint} (ferry init --hub DIR makes a new one)")
         self.begin(s)
         s.use_hub()
         ui.hdr(f"pull ← {hub.location}")

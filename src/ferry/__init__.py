@@ -9,6 +9,7 @@ encrypted folder on a shared drive. One module per layer:
   plan      decisions with no I/O: what kind of push, whether to compact, the budget
   store     where the hub's files are kept: a folder on a share. Files and
             folders only, whole files only
+  s3        a hub in an S3 bucket: the only module that uses boto3 (the s3 extra)
   hub       the hub's layout: slots, manifests, packs, the compaction lock
   config    this machine's settings for a project, and where they live
   project   ferry.toml: which repos a project has, and where each one lives
