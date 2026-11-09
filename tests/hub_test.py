@@ -455,6 +455,9 @@ def everyday() -> None:
         check("an unreachable hub fails at the terminal", lambda: out.code == 1 and says(out, "hub not reachable", "Not on the hub yet: source."))
         out = m("A", "pull", "--hook", **away)
         check("... and only warns the session", lambda: out.code == 0 and out.startswith("ferry: WARNING — hub not reachable"))
+        out = m("A", "status", **away)
+        check("... and status reports from what was last fetched", lambda: out.code == 0
+              and says(out, "comparing against what was last fetched", "source ", "vs B: ", "last pull:"))
     m("A", "sync")
 
     mkdir(T / "E" / "home", key("E"), T / "E" / "conf" / "ferry" / "other")

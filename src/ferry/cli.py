@@ -289,7 +289,7 @@ class Run:
                 ui.info(f"{pad}{text}")
                 if up and s.hub.lock_held(n):
                     ui.info(f"{pad}compaction under way on {s.hub.lock_owner(n) or 'an unknown machine'}")
-                for h in s.hub.others():
+                for h in s.hub.others() if up else s.seen_hosts(n):
                     f = s.seen_epoch(h, n)
                     if f.is_file() and EpochRecord.load(f).number < rec.number:
                         ui.info(f"{pad}vs {h}: {ui.mark('still on the history before the last compaction')} — moves across at its next sync")

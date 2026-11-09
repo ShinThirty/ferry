@@ -401,6 +401,12 @@ class Sync:
     def seen_epoch(self, h: str, n: str) -> Path:
         return self.state / "seen" / f"{h}.{n}.epoch"
 
+    def seen_hosts(self, n: str) -> list[str]:
+        """The other machines whose copy of auto repo n was last read here: the
+        hub as this machine last saw it."""
+        suffix = f".{n}.epoch"
+        return sorted(f.name[:-len(suffix)] for f in (self.state / "seen").glob(f"*{suffix}"))
+
     def top_epoch(self, n: str) -> int:
         """The newest epoch known here, this machine's or another's."""
         return max([self.epoch(n).number] +
