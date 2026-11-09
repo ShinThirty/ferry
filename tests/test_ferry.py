@@ -25,6 +25,7 @@ from ferry.store import FolderStore, Store, StoreError, store_at
 try:                                        # the s3 extra, and moto from the dev group
     import boto3
     from botocore.config import Config
+    from botocore.stub import Stubber
     from moto import mock_aws
 
     from ferry.s3 import S3Store
@@ -391,6 +392,13 @@ class S3Files(MockS3, unittest.TestCase):
             Hub(S3Store("nowhere", "hub/"), "alpha", None).is_up()
         with self.assertRaisesRegex(StoreError, "no bucket nowhere"):
             S3Store("nowhere", "hub/").check_vacant()
+
+    def test_refused_credentials_are_told_apart_from_permissions(self):
+        for code, said in (("ExpiredToken", "credentials .* won't do .*aws login"), ("AccessDenied", "needs s3:ListBucket")):
+            stub = Stubber(self.store.client)
+            stub.add_client_error("get_object", service_error_code=code, http_status_code=400 if code == "ExpiredToken" else 403)
+            with stub, self.assertRaisesRegex(StoreError, said):
+                Hub(self.store, "alpha", None).is_up()
 
     def test_vacant(self):
         with self.assertRaisesRegex(StoreError, "isn't empty"):

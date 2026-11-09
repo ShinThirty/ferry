@@ -38,6 +38,8 @@ from .store import Stat, Store, StoreError
 # the network it should give up and work from local state.
 CLIENT_CONFIG = Config(connect_timeout=5, read_timeout=60, retries={"mode": "standard", "max_attempts": 3})
 PERMISSIONS = "s3:ListBucket on the bucket, and s3:GetObject, s3:PutObject, s3:DeleteObject under the prefix"
+# Refusals of the credentials themselves, rather than of what they may do.
+BAD_CREDENTIALS = {"InvalidAccessKeyId", "SignatureDoesNotMatch", "ExpiredToken", "InvalidToken", "TokenRefreshRequired"}
 
 
 def _code(e: ClientError) -> tuple[str, int]:
@@ -88,6 +90,9 @@ class S3Store(Store):
                 raise StoreError(f"there's no bucket {self.bucket} — or not one these AWS credentials can see") from e
             if code in ("NoSuchKey", "404") or status == 404:
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), f"{self.location}/{key}") from e
+            if code in BAD_CREDENTIALS:
+                raise StoreError(f"the AWS credentials for {self.location} won't do — {msg} "
+                                 "(aws login, or aws configure, renews them)") from e
             if code == "AccessDenied" or status == 403:
                 raise StoreError(f"access denied to {self.location} — ferry needs {PERMISSIONS} ({msg})") from e
             raise StoreError(f"{self.location}: {code or status} — {msg}") from e

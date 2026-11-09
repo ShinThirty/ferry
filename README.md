@@ -101,8 +101,8 @@ uv tool install 'ferry[s3] @ git+https://github.com/ShinThirty/ferry'
 ```
 
 Make the bucket first: ferry makes nothing outside the prefix. Each machine
-needs AWS credentials where the AWS CLI finds them (`aws configure`,
-`AWS_PROFILE`, `AWS_REGION`), allowed:
+needs AWS credentials where the AWS CLI finds them (`aws login`,
+`aws configure`, `AWS_PROFILE`, `AWS_REGION`), allowed:
 
 ```json
 {"Version": "2012-10-17", "Statement": [

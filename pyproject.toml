@@ -18,7 +18,7 @@ Repository = "https://github.com/ShinThirty/ferry"
 ferry = "ferry.cli:main"
 
 [project.optional-dependencies]
-s3 = ["boto3>=1.36,<2"]             # a hub in S3
+s3 = ["boto3[crt]>=1.36,<2"]        # a hub in S3; crt reads the credentials aws login leaves
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
