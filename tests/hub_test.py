@@ -1,20 +1,26 @@
 """hub_test.py — ferry end to end: fake machines, each with its own HOME and
 config folder, syncing through scratch hubs in a temp dir. Nothing outside it
-is touched; no real hub or config is ever read. Takes a few minutes.
+is touched; no real hub or ferry config is ever read, and only for a hub in S3
+your AWS sign-in. Takes a few minutes.
 
   uv run python tests/hub_test.py
   FERRY_TEST_SHARE=DIR uv run python tests/hub_test.py
+  FERRY_TEST_S3=s3://BUCKET/PREFIX uv run python tests/hub_test.py
 
 The second puts the scratch hubs in a fresh folder under DIR, a folder on a
 real share, to try its locking, renames and listings; the folder goes after
-a clean run.
+a clean run. The third puts them under a fresh prefix in an S3 bucket that is
+there already, signed in as whoever runs the test (aws login, a profile, ...);
+the prefix goes after a clean run.
 
 Part 1 is the everyday: enroll, chains, hooks, merges, conflicts, budgets, an
 unreachable hub, rekey, retire, a move to a new hub. Part 2 is compaction.
 Each prints PASS/FAIL per check; the temp dir is kept when anything fails.
 
-The standard library only: ferry runs as installed, never imported here.
+The standard library only: ferry runs as installed, never imported here, and
+S3 is reached through the test venv's own boto3, as ferry would reach it.
 """
+import json
 import os
 import re
 import shutil
@@ -24,9 +30,10 @@ import sys
 import tempfile
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
-passed = failed = 0
+passed = failed = skipped = 0
 
 
 class Out(str):
@@ -36,7 +43,7 @@ class Out(str):
 
 
 def run(cmd, cwd=None, env=None) -> Out:
-    p = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+    p = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = Out(p.stdout.decode("utf-8", "replace").rstrip("\n"))
     out.code = p.returncode
@@ -56,8 +63,14 @@ def check(name, cond) -> None:
     print(f"{'PASS' if ok else 'FAIL'}  {name}{why}", flush=True)
 
 
+def skip(name, why) -> None:
+    global skipped
+    skipped += 1
+    print(f"SKIP  {name}  ({why})", flush=True)
+
+
 def on(x, *cmd, cwd=None, **env) -> Out:    # a command as machine x
-    return run(cmd, cwd, {**os.environ, "HOME": str(T / x / "home"), "XDG_CONFIG_HOME": str(T / x / "conf"), **env})
+    return run(cmd, cwd, {**machines_env(), "HOME": str(T / x / "home"), "XDG_CONFIG_HOME": str(T / x / "conf"), **env})
 
 
 def m(x, *args, **env) -> Out:
@@ -175,7 +188,7 @@ def drops(out, sha) -> bool:
 
 
 def slot(x, r) -> int:                      # KB in a machine's slot for a repo
-    return sum(f.stat().st_size for f in (H / x / r).iterdir()) // 1024
+    return H.kb(f"{x}/{r}")
 
 
 def settle(*xs) -> None:
@@ -191,7 +204,168 @@ print(Keyring.load(Path(sys.argv[1])).open_text(Path(sys.argv[2])).split("\\n")[
 
 
 def magic(x, r) -> str:                    # print ends its line with \r\n on Windows
-    return run([PY, "-c", MAGIC, key("A"), H / x / r / "manifest.age"]).rstrip("\r")
+    with H.local(f"{x}/{r}/manifest.age") as f:
+        return run([PY, "-c", MAGIC, key("A"), f]).rstrip("\r")
+
+
+# --- the hub, in a folder or in S3 ---------------------------------------------
+# What the test reads on a hub and plants there, by key: a path under the hub
+# with / between its parts, as ferry's store names them. str(hub) is what
+# --hub takes and ferry hub says.
+class FolderHub:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __str__(self) -> str:
+        return str(self.path)
+
+    def is_named(self, out) -> bool:        # ferry hub's answer is this hub
+        return Path(out) == self.path
+
+    def read(self, key) -> str:
+        return read(self.path / key)
+
+    def exists(self, key) -> bool:
+        return (self.path / key).exists()
+
+    def files(self, folder, suffix) -> list:
+        return [f.name for f in (self.path / folder).glob(f"*{suffix}")]
+
+    def kb(self, folder) -> int:
+        return sum(f.stat().st_size for f in (self.path / folder).iterdir()) // 1024
+
+    @contextmanager
+    def local(self, key):
+        yield self.path / key
+
+    def plant(self, key, text) -> None:
+        mkdir((self.path / key).parent); write(self.path / key, text)
+
+    def remove(self, key) -> None:
+        rmtree(self.path / key)
+
+    @contextmanager
+    def unreachable(self):                  # the environment a machine sees it in
+        away = self.path.with_name(f"{self.path.name}.away")
+        os.rename(self.path, away)
+        try:
+            yield {}
+        finally:
+            os.rename(away, self.path)
+
+    @contextmanager
+    def manifest_blocked(self, slot):       # a slot whose manifest can't be written: its .part is a folder
+        part = self.path / slot / ".manifest.age.part"
+        part.mkdir()
+        try:
+            yield True
+        finally:
+            part.rmdir()
+
+
+# boto3 as the test venv has it, run as whoever runs the test: their own HOME,
+# and their own AWS sign-in.
+S3 = """import json, sys, boto3
+cmd, url = sys.argv[1], sys.argv[2]
+session = boto3.Session()
+if cmd == "creds":
+    c = session.get_credentials().get_frozen_credentials()
+    print(json.dumps({"AWS_ACCESS_KEY_ID": c.access_key, "AWS_SECRET_ACCESS_KEY": c.secret_key,
+                      "AWS_SESSION_TOKEN": c.token or "", "AWS_REGION": session.region_name or ""}))
+    sys.exit()
+bucket, _, key = url.removeprefix("s3://").partition("/")
+s3 = session.client("s3")
+under = [o for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=key + "/")
+         for o in page.get("Contents", [])] if cmd in ("ls", "rm") else []
+if cmd == "ls":
+    for o in under:
+        print(o["Size"], o["Key"][len(key) + 1:])
+elif cmd == "get":
+    s3.download_file(bucket, key, sys.argv[3])
+elif cmd == "put":
+    s3.put_object(Bucket=bucket, Key=key, Body=sys.argv[3].encode())
+elif cmd == "rm":
+    for i in range(0, len(under), 1000):
+        s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": o["Key"]} for o in under[i:i + 1000]]})
+"""
+
+
+def s3(*args) -> Out:
+    out = run([PY, "-c", S3, *args])
+    if out.code:
+        raise RuntimeError(f"s3 {args[0]} {args[1]}: {out}")
+    return out
+
+
+class S3Hub:
+    def __init__(self, url: str):
+        self.url = url
+
+    def __str__(self) -> str:
+        return self.url
+
+    def is_named(self, out) -> bool:
+        return out == self.url
+
+    def _ls(self, folder) -> dict:          # every object under folder: its name there, and size
+        return {name: int(size) for size, _, name in (line.partition(" ") for line in s3("ls", f"{self.url}/{folder}").split("\n") if line)}
+
+    def read(self, key) -> str:
+        with self.local(key) as f:
+            return read(f)
+
+    def exists(self, key) -> bool:
+        return bool(self._ls(key))
+
+    def files(self, folder, suffix) -> list:
+        return [n for n in self._ls(folder) if "/" not in n and n.endswith(suffix)]
+
+    def kb(self, folder) -> int:
+        return sum(size for n, size in self._ls(folder).items() if "/" not in n) // 1024
+
+    @contextmanager
+    def local(self, key):
+        d = Path(tempfile.mkdtemp(prefix="ferry-test-s3."))
+        try:
+            s3("get", f"{self.url}/{key}", d / "file")
+            yield d / "file"
+        finally:
+            rmtree(d)
+
+    def plant(self, key, text) -> None:
+        s3("put", f"{self.url}/{key}", f"{text}\n")
+
+    def remove(self, key) -> None:
+        s3("rm", f"{self.url}/{key}")
+
+    @contextmanager
+    def unreachable(self):                  # S3 at an address where nothing answers
+        yield {"AWS_ENDPOINT_URL": "http://127.0.0.1:9"}
+
+    @contextmanager
+    def manifest_blocked(self, slot):       # S3 offers no way to make one write fail
+        yield False
+
+
+def hub_at(name):
+    return S3Hub(f"{HUBS}/{name}") if isinstance(HUBS, str) else FolderHub(HUBS / name)
+
+
+_aws, _aws_at = {}, 0.0
+
+
+def machines_env() -> dict:
+    """The environment every machine starts from. With a hub in S3, the AWS
+    credentials of whoever runs the test, fetched afresh every few minutes:
+    no machine's HOME holds an ~/.aws, and a sign-in such as aws login hands
+    out credentials that last minutes."""
+    global _aws, _aws_at
+    if not isinstance(HUBS, str):
+        return dict(os.environ)
+    if time.time() - _aws_at > 180:
+        _aws, _aws_at = {k: v for k, v in json.loads(s3("creds", "")).items() if v}, time.time()
+    keep = {k: v for k, v in os.environ.items() if not k.startswith("AWS_") or k.startswith(("AWS_ENDPOINT_URL", "AWS_CA_BUNDLE"))}
+    return {**keep, **_aws}
 
 
 def setup() -> Out:                         # a fresh hub at H, with machine A on it at T
@@ -223,7 +397,7 @@ def add(x) -> Out:                          # enroll another machine with A's ke
 # --- part 1: the everyday ------------------------------------------------------
 def everyday() -> None:
     out = setup()
-    check("init publishes the first machine", lambda: "A is the first machine on the hub" in out and read(H / "FORMAT") == "ferry 1")
+    check("init publishes the first machine", lambda: "A is the first machine on the hub" in out and H.read("FORMAT") == "ferry 1")
     out = add("B"); add("C")
     check("enroll copies every repo", lambda: "B is enrolled: proj is at" in out and same(src("A"), src("B")) and same(memdir("A") / "MEMORY.md", memdir("B") / "MEMORY.md"))
 
@@ -265,7 +439,7 @@ def everyday() -> None:
     m("C", "sync")
     for i in range(1, 5):
         append(src("A") / "a.txt", f"r{i}"); m("A", "push", "--only", "source", FERRY_MAXCHAIN="3")
-    check("a full chain restarts", lambda: len(list((H / "A" / "source").glob("*.pack.age"))) <= 3)
+    check("a full chain restarts", lambda: len(H.files("A/source", ".pack.age")) <= 3)
     out = m("C", "pull")
     check("a reader that kept up skips the new base", lambda: says(out, "source ← A: ", " KB") and " MB" not in out and last(src("C") / "a.txt") == "r4")
 
@@ -275,13 +449,13 @@ def everyday() -> None:
     settle("C"); time.sleep(2); settle("C"); m("C", "pull", "--hook")
     check("... which lands at the next one", lambda: (src("C") / "big2.bin").is_file())
 
-    away = H.with_name(f"{H.name}.away")
-    os.rename(H, away); append(src("A") / "a.txt", "offline")
-    out = m("A", "sync")
-    check("an unreachable hub fails at the terminal", lambda: out.code == 1 and says(out, "hub not reachable", "Not on the hub yet: source."))
-    out = m("A", "pull", "--hook")
-    check("... and only warns the session", lambda: out.code == 0 and out.startswith("ferry: WARNING — hub not reachable"))
-    os.rename(away, H); m("A", "sync")
+    with H.unreachable() as away:
+        append(src("A") / "a.txt", "offline")
+        out = m("A", "sync", **away)
+        check("an unreachable hub fails at the terminal", lambda: out.code == 1 and says(out, "hub not reachable", "Not on the hub yet: source."))
+        out = m("A", "pull", "--hook", **away)
+        check("... and only warns the session", lambda: out.code == 0 and out.startswith("ferry: WARNING — hub not reachable"))
+    m("A", "sync")
 
     mkdir(T / "E" / "home", key("E"), T / "E" / "conf" / "ferry" / "other")
     shutil.copy(key("A") / "identity", key("E")); shutil.copy(key("A") / "identity", T / "E" / "conf" / "ferry" / "other")
@@ -327,20 +501,20 @@ def everyday() -> None:
     check("the new key reads them, and re-seals its own", lambda: (src("B") / "k.txt").is_file() and "full copy (its manifest is unreadable — a new key?)" in out)
 
     m("A", "retire", "C"); m("B", "sync")
-    check("retire drops the slot, and others forget it", lambda: not (H / "C").is_dir() and mg("B", "source", "for-each-ref", "refs/hub/C/") == "")
+    check("retire drops the slot, and others forget it", lambda: not H.exists("C") and mg("B", "source", "for-each-ref", "refs/hub/C/") == "")
     # A move to another hub: one machine makes it, and each other follows when it
     # sets its path; until then it syncs through the old one.
-    H2 = HUBS / "daily-hub2"
-    out = m("A", "hub"); check("hub says which hub this machine uses", lambda: Path(out) == H)
+    H2 = hub_at("daily-hub2")
+    out = m("A", "hub"); check("hub says which hub this machine uses", lambda: H.is_named(out))
     hub = R("B") / ".ferry" / "hub"
     os.rename(hub, f"{hub}.x"); out = m("B", "sync"); os.rename(f"{hub}.x", hub)
     check("... and a machine without one is told how to set it", lambda: says(out, "no hub set", "ferry hub DIR"))
     out = m("A", "init", "--hub", H); check("init makes no hub where there is one", lambda: says(out, "a hub at", "already — ferry hub"))
     write(src("A") / "m.txt", "moved"); out = m("A", "init", "--hub", H2)
-    check("init on a machine that syncs is a move", lambda: read(H2 / "FORMAT") == "ferry 1" and count(out, "full copy (first push)") == 5 and Path(m("A", "hub")) == H2)
+    check("init on a machine that syncs is a move", lambda: H2.read("FORMAT") == "ferry 1" and count(out, "full copy (first push)") == 5 and H2.is_named(m("A", "hub")))
     write(src("B") / "s.txt", "stayed"); out = m("B", "sync")
     check("... and a machine not moved yet stays apart", lambda: not (src("B") / "m.txt").is_file() and "not reachable" not in out)
-    out = m("B", "hub", T / "nowhere"); check("hub needs a hub there", lambda: "no hub at" in out and Path(m("B", "hub")) == H)
+    out = m("B", "hub", T / "nowhere"); check("hub needs a hub there", lambda: "no hub at" in out and H.is_named(m("B", "hub")))
     out = m("B", "hub", H2)
     check("it follows with ferry hub, bringing what it did meanwhile", lambda: (src("B") / "m.txt").is_file() and "source ← A: merged" in out
           and all(n.startswith("A.") for n in os.listdir(R("B") / ".ferry" / "seen")))
@@ -362,7 +536,7 @@ def compaction() -> None:
     check("A compacts source, skips memory/personal", lambda: drops(out, big) and "memory: already compact" in out)
     check("A slot is small", lambda: slot("A", "source") < 50)
     check("... and starts from a commit every machine can build", lambda: mg("A", "source", "log", "-1", "--format=%an %ae %cn %ce") == "ferry ferry@epoch ferry ferry@epoch")
-    check("lock released", lambda: not (H / ".compacting-source").is_dir())
+    check("lock released", lambda: not H.exists(".compacting-source"))
     out = m("B", "sync")
     check("B moves across without downloading source", lambda: "moved onto the history A compacted (epoch 1)" in out and "source ← A" not in out)
     check("no duplicate-parent noise", lambda: "duplicate parent" not in out)
@@ -416,28 +590,31 @@ def compaction() -> None:
     for x in "BCD":
         m(x, "sync")
     m("A", "sync")
-    mkdir(H / ".compacting-source"); write(H / ".compacting-source" / "owner", "Z")
+    H.plant(".compacting-source/owner", "Z")
     append(src("A") / "a.txt", "x"); m("A", "sync")
     out = m("A", "compact", "source")
     check("someone else's lock holds A off", lambda: "not compacting — Z is" in out)
-    rmtree(H / ".compacting-source")
+    H.remove(".compacting-source")
     for x in "BCD":
         m(x, "sync")
     m("A", "sync")
-    part = H / "A" / "source" / ".manifest.age.part"
-    part.mkdir()                            # so its manifest can't be written
-    m("A", "compact", "source"); part.rmdir()
-    check("a failed compaction keeps the lock", lambda: read(H / ".compacting-source" / "owner") == "A")
+    with H.manifest_blocked("A/source") as blocked:
+        m("A", "compact", "source")
     append(src("B") / "c.txt", "z")
-    out = m("B", "compact", "source")
-    check("... and holds B off", lambda: "not compacting — A is" in out)
-    m("A", "push")
-    check("A's next push publishes and unlocks", lambda: not (H / ".compacting-source").is_dir())
+    if blocked:
+        check("a failed compaction keeps the lock", lambda: H.read(".compacting-source/owner") == "A")
+        out = m("B", "compact", "source")
+        check("... and holds B off", lambda: "not compacting — A is" in out)
+        m("A", "push")
+        check("A's next push publishes and unlocks", lambda: not H.exists(".compacting-source"))
+    else:                                   # A compacted, then; B's edit is still on the old history
+        for name in ("a failed compaction keeps the lock", "... and holds B off", "A's next push publishes and unlocks"):
+            skip(name, "a hub in folders only: S3 offers no way to make one write fail")
     out = m("B", "sync")
     check("B moves across with its later edit", lambda: "own changes kept on top" in out and last(src("B") / "c.txt") == "z")
-    mkdir(H / ".compacting-personal"); write(H / ".compacting-personal" / "owner", "C")
+    H.plant(".compacting-personal/owner", "C")
     m("A", "retire", "C")
-    check("retire drops the retired machine's lock", lambda: not (H / ".compacting-personal").is_dir())
+    check("retire drops the retired machine's lock", lambda: not H.exists(".compacting-personal"))
 
     # tidy, then a chain restart on the new epoch
     m("A", "sync")
@@ -461,7 +638,10 @@ if __name__ == "__main__":
     TOOL = Path(__file__).resolve().parent.parent
     ROOT = Path(tempfile.mkdtemp()).resolve()      # physical, with long names, as ferry resolves it
     HUBS = ROOT
-    if share := os.environ.get("FERRY_TEST_SHARE"):
+    share, bucket = os.environ.get("FERRY_TEST_SHARE"), os.environ.get("FERRY_TEST_S3")
+    if share and bucket:
+        sys.exit("FERRY_TEST_SHARE or FERRY_TEST_S3, not both")
+    if share:
         HUBS = Path(tempfile.mkdtemp(prefix="ferry-test.", dir=share))
         print(f"hubs on the share: {HUBS}")
     for v in ("GIT_DIR", "GIT_WORK_TREE"):
@@ -470,25 +650,41 @@ if __name__ == "__main__":
     # where the post-commit hooks look for it.
     venv = ROOT / "venv"
     env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}      # uv run's, not this one
-    if subprocess.run(["uv", "sync", "--quiet", "--project", TOOL], env={**env, "UV_PROJECT_ENVIRONMENT": str(venv)}).returncode:
+    extra = ["--extra", "s3"] if bucket else []
+    if subprocess.run(["uv", "sync", "--quiet", "--project", TOOL, *extra], env={**env, "UV_PROJECT_ENVIRONMENT": str(venv)}).returncode:
         sys.exit(1)
     BIN = venv / "bin" if (venv / "bin").is_dir() else venv / "Scripts"
     os.environ["PATH"] = f"{BIN}{os.pathsep}{os.environ['PATH']}"
     FERRY, PY = shutil.which("ferry", path=BIN), shutil.which("python", path=BIN)
+    if bucket:
+        if not bucket.startswith("s3://"):
+            sys.exit(f"FERRY_TEST_S3 is s3://BUCKET/PREFIX, not {bucket}")
+        HUBS = f"{bucket.rstrip('/')}/ferry-test.{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        try:
+            machines_env()
+        except RuntimeError as e:
+            sys.exit(f"no AWS credentials to test with — {e}")
+        print(f"hubs in S3: {HUBS}")
 
-    for part, T, H in ((everyday, ROOT / "daily", HUBS / "daily-hub"), (compaction, ROOT / "compact", HUBS / "compact-hub")):
+    for part, T, H in ((everyday, ROOT / "daily", hub_at("daily-hub")), (compaction, ROOT / "compact", hub_at("compact-hub"))):
         try:
             part()
         except Exception:
             failed += 1
             print(f"FAIL  {part.__name__} stopped:\n{traceback.format_exc()}", flush=True)
 
-    print(f"== {passed} passed, {failed} failed")
+    print(f"== {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))
     if failed:
         print(f"kept for a look: {ROOT} {HUBS}")
     else:
         try:
-            rmtree(ROOT); rmtree(HUBS)
+            if isinstance(HUBS, str):
+                s3("rm", HUBS)                  # first: the venv it runs in is under ROOT
+            else:
+                rmtree(HUBS)
+            rmtree(ROOT)
         except OSError as e:
             print(f"left behind: {e.filename} ({e.strerror})")
+        except RuntimeError as e:
+            print(f"left behind in S3: {HUBS} ({e})")
     sys.exit(1 if failed else 0)

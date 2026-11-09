@@ -234,14 +234,17 @@ on Windows set your editor to LF. Other notes:
 uv run python -m unittest discover -s tests            # seconds
 uv run python tests/hub_test.py                        # machines and hubs, a few minutes
 FERRY_TEST_SHARE=DIR uv run python tests/hub_test.py   # the hubs in a folder on a real share
+FERRY_TEST_S3=s3://BUCKET/PREFIX uv run python tests/hub_test.py   # the hubs in S3, as you're signed in
 ```
 
 Only `gitcli` runs git, only `crypto` touches age, and the decisions with no
 I/O in them are in `plan`. The unit tests hold those rules. Only `store`
 touches the hub's files, and only `s3` touches AWS. `StoreContract` in the
 unit tests is what any kind of store must do. The unit tests run the S3 store
-against moto, in process; `hub_test.py` runs hubs in folders only. Every machine reads the hub, so a change to its format
-needs a new `FORMAT`.
+against moto, in process; `hub_test.py` with `FERRY_TEST_S3` runs it against
+a real bucket, which must be there already, and skips the three checks S3
+can't stage: a compaction whose manifest write fails. Every machine reads the hub, so a change
+to its format needs a new `FORMAT`.
 
 ## License
 
