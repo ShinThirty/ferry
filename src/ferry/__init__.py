@@ -7,7 +7,9 @@ encrypted folder on a shared drive. One module per layer:
             process lives, a detached rerun, renames that wait out an open handle
   manifest  a slot's manifest and a repo's epoch record: parsing and formatting
   plan      decisions with no I/O: what kind of push, whether to compact, the budget
-  hub       the shared folder's layout: slots, manifests, packs, the compaction lock
+  store     where the hub's files are kept: a folder on a share. Files and
+            folders only, whole files only
+  hub       the hub's layout: slots, manifests, packs, the compaction lock
   config    this machine's settings for a project, and where they live
   project   ferry.toml: which repos a project has, and where each one lives
   ui        what ferry says, to a terminal, Claude's session start, or the log

@@ -16,7 +16,7 @@ from . import gitcli, plan, system
 from .config import Settings
 from .crypto import Keyring
 from .gitcli import BRANCHES, Git, GitError
-from .hub import Hub, fsig
+from .hub import Hub
 from .manifest import Epoch, EpochRecord, Manifest, Pack
 from .project import ROOT, STATE, Layout
 from .ui import BG, HOOK, UI, human
@@ -187,10 +187,10 @@ class Sync:
         what was known of the last one's slots: which manifests had been read, and
         what this machine's own slot held. Refs of machines not on this hub go at
         the next prune; none of their commits do, so nothing is downloaded again."""
-        if _read(self.layout.hub_file) != str(self.hub.root):
+        if _read(self.layout.hub_file) != self.hub.location:
             for d in ("seen", "pushed"):
                 shutil.rmtree(self.state / d, ignore_errors=True)
-            _write(self.layout.hub_file, str(self.hub.root))
+            _write(self.layout.hub_file, self.hub.location)
 
     def spawn(self, *args: str) -> None:
         system.spawn_detached(["-C", str(self.layout.folder), *args], self.state / "log")
@@ -238,11 +238,8 @@ class Sync:
         """Bring refs/hub/<h>/* up to that machine's manifest. Returns the manifest
         if it was read."""
         g = self.git(n)
-        mf = self.hub.manifest_file(h, n)
-        if not mf.is_file():
-            return None
-        seen, sig = self.seen(h, n), fsig(mf)
-        if _read(seen) == sig:
+        seen, sig = self.seen(h, n), self.hub.manifest_sig(h, n)
+        if sig is None or _read(seen) == sig:
             return None
         m = self.hub.read_manifest(h, n)
         if m is None:
@@ -311,8 +308,8 @@ class Sync:
         """Every changed copy's epoch first, so that one still on an older epoch
         than another is skipped, rather than downloaded and dropped once this one moves."""
         for h in self.hub.others():
-            mf = self.hub.manifest_file(h, n)
-            if not mf.is_file() or _read(self.seen(h, n)) == fsig(mf):
+            sig = self.hub.manifest_sig(h, n)
+            if sig is None or _read(self.seen(h, n)) == sig:
                 continue
             m = self.hub.read_manifest(h, n)
             if m is not None:
@@ -534,7 +531,7 @@ class Sync:
 
         covers = []
         for h in self.hub.others():
-            if not self.hub.manifest_file(h, n).is_file():
+            if not self.hub.has_manifest(h, n):
                 continue
             m = self.hub.read_manifest(h, n)
             sha = m.branch(b) if m else None
@@ -573,11 +570,10 @@ class Sync:
         if not g.branches():
             return
         sig = self.slotsig(n)
-        has_manifest = self.hub.manifest_file(self.host, n).is_file()
+        has_manifest = self.hub.has_manifest(self.host, n)
         if not self.force and has_manifest and _read(mark) == sig:
             return
-        slot = self.hub.slot(self.host, n)
-        slot.mkdir(parents=True, exist_ok=True)
+        self.hub.make_slot(n)
         g.delete_refs("refs/sync/base/")                   # left behind if a push died mid-restart
         if self.maybe_compact(n):
             sig = self.slotsig(n)
@@ -587,7 +583,7 @@ class Sync:
         old = self.hub.read_manifest(self.host, n)
         epoch = self.epoch(n)
         kind, why = plan.choose_push(
-            old, manifest_exists=self.hub.manifest_file(self.host, n).is_file(),
+            old, manifest_exists=self.hub.has_manifest(self.host, n),
             present=self.hub.packs(self.host, n), recipient=self.keys.recipient,
             maxchain=self.settings.maxchain, epoch=epoch.epoch, compacted=self.compacted,
             history_kept=all(g.has_commit(t) for t in (old.published if old else [])))
@@ -671,7 +667,7 @@ class Sync:
         return packs
 
     def push(self, only: str | None = None) -> None:
-        (self.hub.root / self.host).mkdir(parents=True, exist_ok=True)
+        self.hub.join()
         for n in [only] if only else self.project.names:
             if self.have(n):
                 self.push_one(n)
@@ -688,7 +684,7 @@ class Sync:
     def hub_down(self) -> None:
         waiting = [n for n in self.project.names if self.have(n) and self.pending(n)]
         not_yet = f" Not on the hub yet: {' '.join(waiting)}." if waiting else ""
-        self.ui.warn(f"hub not reachable at {self.hub.root} — working from local state, last pulled "
+        self.ui.warn(f"hub not reachable at {self.hub.location} — working from local state, last pulled "
                      f"{self.last_pull() or 'never'}.{not_yet} Run ferry once it's back.")
 
     def newest(self, n: str) -> str | None:

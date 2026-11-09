@@ -19,6 +19,7 @@ from .gitcli import GitError
 from .hub import Hub, HubFormatError
 from .manifest import EpochRecord
 from .project import ROOT, Layout, Project, ProjectError
+from .store import Store, StoreError, store_at
 from .ui import BG, HOOK, NORMAL, UI, day, human
 
 HELP = """\
@@ -91,11 +92,11 @@ class Run:
             found[a] = next(it, None) or self.die(f"{a} needs {wanted[a]}")
         return found
 
-    def hub_option(self, opts: dict[str, str], command: str) -> Path:
+    def hub_option(self, opts: dict[str, str], command: str) -> Store:
         """Where the share is mounted differs by OS, so each machine names its hub."""
         if "--hub" not in opts:
             self.die(f"{command} needs --hub DIR: the hub's folder, as the share is mounted on this machine")
-        return Path(opts["--hub"])
+        return store_at(opts["--hub"])
 
     def check_repo(self, s: Sync, n: str) -> None:
         if n not in s.project.names:
@@ -112,7 +113,7 @@ class Run:
         if v < gitcli.MIN_VERSION:
             self.die(f"git {v[0]}.{v[1]} is too old — ferry needs {'.'.join(map(str, gitcli.MIN_VERSION))} or later")
 
-    def engine(self, layout: Layout, hub: Path, host: str, keys: Keyring) -> Sync:
+    def engine(self, layout: Layout, hub: Store, host: str, keys: Keyring) -> Sync:
         if self.sync:
             self.sync.close()
         self.sync = Sync(layout, Hub(hub, host, keys), keys, self.ui, Settings.from_env())
@@ -132,7 +133,7 @@ class Run:
         self.machine = Machine.of(proj.name)
         return folder.resolve(), proj
 
-    def load(self, hub: Path | None = None) -> Sync:
+    def load(self, hub: Store | None = None) -> Sync:
         """The engine for the project here, on its hub as this machine has it, or
         on hub."""
         folder, proj = self.find()
@@ -151,7 +152,7 @@ class Run:
         layout = Layout(folder, proj)
         if hub is None:
             try:
-                hub = Path(layout.hub_file.read_text(encoding="utf-8").strip())
+                hub = store_at(layout.hub_file.read_text(encoding="utf-8").strip())
             except FileNotFoundError:
                 self.die(f"no hub set for {proj.name} on this machine — ferry hub DIR, DIR being the hub's folder "
                          "as the share is mounted here")
@@ -183,12 +184,12 @@ class Run:
         if not s.hub.is_up():
             s.hub_down()
             return 1 if self.ui.mode == NORMAL else 0
-        self.ui.hdr(f"pull ← {s.hub.root}")
+        self.ui.hdr(f"pull ← {s.hub.location}")
         self.ui.said = False
         s.pull()
         if not self.ui.said:
             self.ui.ok("nothing new from other machines")
-        self.ui.hdr(f"push → {s.hub.root}/{s.host}")
+        self.ui.hdr(f"push → {s.hub.location}/{s.host}")
         self.ui.said = False
         s.push()
         if not self.ui.said:
@@ -207,7 +208,7 @@ class Run:
         if not s.hub.is_up():
             s.hub_down()
             return 0
-        self.ui.hdr(f"pull ← {s.hub.root}")
+        self.ui.hdr(f"pull ← {s.hub.location}")
         s.pull()
         if not self.ui.said:
             hs = s.hub.others()
@@ -223,7 +224,7 @@ class Run:
         if not s.hub.is_up():
             s.hub_down()
             return 0
-        self.ui.hdr(f"fetch ← {s.hub.root}")
+        self.ui.hdr(f"fetch ← {s.hub.location}")
         for n in s.project.names:
             if s.have(n):
                 s.fetch_all(n)
@@ -242,7 +243,7 @@ class Run:
         if not s.hub.is_up():
             s.hub_down()
             return 0
-        self.ui.hdr(f"push → {s.hub.root}/{s.host}")
+        self.ui.hdr(f"push → {s.hub.location}/{s.host}")
         s.push(self.only)
         if not self.ui.said:
             self.ui.ok("the hub already has everything")
@@ -252,7 +253,7 @@ class Run:
     def cmd_status(self, args: Sequence[str]) -> int:
         s, ui = self.load(), self.ui
         self.begin(s)
-        ui.hdr(f"{s.host} ⇄ {s.hub.root}")
+        ui.hdr(f"{s.host} ⇄ {s.hub.location}")
         up = s.hub.is_up()
         if up:
             for n in s.project.names:
@@ -310,7 +311,7 @@ class Run:
         """Make a hub, with this machine its first. On a machine that already syncs
         the project that is a move, and each other machine follows with ferry hub."""
         opts = self.options(args, {"--hub": "a directory", "--host": "a name"}, "init")
-        hub, ui = self.hub_option(opts, "init").absolute(), self.ui
+        hub, ui = self.hub_option(opts, "init"), self.ui
         self.need_git()
         folder, proj = self.find()
         m = self.machine
@@ -328,12 +329,10 @@ class Run:
             self.die(f"root doesn't ignore {', '.join(p + '/' for p in loose)} — add them to its .gitignore, "
                      "or root would carry their files")
         if Hub(hub, host, None).is_up():
-            self.die(f"there's a hub at {hub} already — "
-                     + (f"ferry hub {hub} moves this machine onto it" if cfg else f"ferry enroll {proj.name} --hub {hub} joins it"))
-        if not hub.parent.is_dir():
-            self.die(f"{hub.parent} is not there — is the share mounted?")
-        if hub.is_dir() and any(hub.iterdir()):
-            self.die(f"{hub} isn't empty — a hub starts in an empty folder")
+            self.die(f"there's a hub at {hub.location} already — "
+                     + (f"ferry hub {hub.location} moves this machine onto it" if cfg
+                        else f"ferry enroll {proj.name} --hub {hub.location} joins it"))
+        hub.check_vacant()
 
         ui.hdr("key")
         m.dir.mkdir(parents=True, exist_ok=True)
@@ -362,10 +361,10 @@ class Run:
             ui.ok(f"{n}: {g.tracked_count()} file(s) from {s.layout.worktree(n)}")
         ui.ok(f"{', '.join(proj.kept)}: each commit pushes, through a post-commit hook")
 
-        ui.hdr(f"push → {hub}/{host}")
+        ui.hdr(f"push → {hub.location}/{host}")
         s.push()
         print(f"""
-{host} is the first machine on the hub at {hub}. A machine that already
+{host} is the first machine on the hub at {hub.location}. A machine that already
 syncs {proj.name} moves onto it with ferry hub DIR, DIR being the hub's
 folder as the share is mounted there. A new one, with the share mounted and
 ferry installed:
@@ -384,7 +383,7 @@ ferry installed:
         if not valid_name(name):
             self.die(f"not a project name: {name}")
         opts = self.options(args[1:], {"--hub": "a directory", "--host": "a name", "--dest": "a directory"}, "enroll")
-        hub, host = self.hub_option(opts, "enroll").absolute(), opts.get("--host") or system.default_host()
+        hub, host = self.hub_option(opts, "enroll"), opts.get("--host") or system.default_host()
         if "--dest" not in opts:
             self.die(f"enroll needs --dest DIR: the folder {name} goes in, empty or not there yet")
         dest = Path(opts["--dest"])
@@ -400,7 +399,7 @@ ferry installed:
             self.die(f"no key at {m.key} — copy it from a machine that syncs {name} (AirDrop, USB or scp; not via the share)")
         keys = Keyring.load(m.dir)
         if not Hub(hub, host, keys).is_up():
-            self.die(f"no hub at {hub} — is the share mounted, and is that the hub's folder on it?")
+            self.die(f"no hub at {hub.location} — is the share mounted, and is that the hub's folder on it?")
         if Hub(hub, host, keys).has_host(host):
             self.die(f"the hub already has a machine named {host} — pass --host NAME, or retire {host} first if this machine replaces it")
         if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
@@ -409,14 +408,14 @@ ferry installed:
         folder = dest.resolve()
 
         # Root first: its ferry.toml says what else the project holds.
-        ui.hdr(f"copying from {hub}")
+        ui.hdr(f"copying from {hub.location}")
         self.copy(self.engine(Layout(folder, Project.bare(name)), hub, host, keys), ROOT)
         try:
             proj = Project.load(folder)
         except ProjectError as e:
             self.die(f"{e} — root came from the hub without a ferry.toml ferry can use")
         if proj.name != name:
-            self.die(f"the hub at {hub} holds the project {proj.name}, not {name}")
+            self.die(f"the hub at {hub.location} holds the project {proj.name}, not {name}")
         s = self.engine(Layout(folder, proj), hub, host, keys)
         for n in proj.names[1:]:
             self.copy(s, n)
@@ -426,7 +425,7 @@ ferry installed:
 
         ui.hdr("pull")
         s.pull()
-        ui.hdr(f"push → {hub}/{host}")
+        ui.hdr(f"push → {hub.location}/{host}")
         s.push()
         print(f"\n{host} is enrolled: {name} is at {folder}.")
         return 0
@@ -471,23 +470,23 @@ ferry installed:
         if len(args) > 1 or any(a.startswith("-") for a in args):
             self.die("usage: ferry hub [DIR]")
         if not args:
-            print(self.load().hub.root)
+            print(self.load().hub.location)
             return 0
-        hub, ui = Path(args[0]).absolute(), self.ui
+        hub, ui = store_at(args[0]), self.ui
         s = self.load(hub)
         if not s.hub.is_up():
-            self.die(f"no hub at {hub} — is the share mounted, and is that the hub's folder? "
+            self.die(f"no hub at {hub.location} — is the share mounted, and is that the hub's folder? "
                      "(ferry init --hub DIR makes a new one)")
         self.begin(s)
         s.use_hub()
-        ui.hdr(f"pull ← {hub}")
+        ui.hdr(f"pull ← {hub.location}")
         ui.said = False
         s.pull()
         if not ui.said:
             ui.ok("nothing new from other machines")
-        ui.hdr(f"push → {hub}/{s.host}")
+        ui.hdr(f"push → {hub.location}/{s.host}")
         s.push()
-        print(f"\n{s.host} syncs {s.project.name} through {hub}.")
+        print(f"\n{s.host} syncs {s.project.name} through {hub.location}.")
         return 0
 
     def cmd_retire(self, args: Sequence[str]) -> int:
@@ -501,7 +500,7 @@ ferry installed:
             self.die("that's this machine — retire it from another one")
         self.begin(s)
         if not s.hub.is_up():
-            self.die(f"hub not reachable at {s.hub.root}")
+            self.die(f"hub not reachable at {s.hub.location}")
         if not s.hub.has_host(h):
             self.die(f"no machine named {h} on the hub (there: {' '.join(s.hub.others())})")
         s.hub.retire(h)
@@ -520,7 +519,7 @@ ferry installed:
         m.key.rename(old)
         generate_key(m.key)
         s.use_keys(Keyring.load(m.dir))
-        self.ui.hdr(f"re-encrypting {s.hub.root}/{s.host}")
+        self.ui.hdr(f"re-encrypting {s.hub.location}/{s.host}")
         s.push()
         print(f"""
 New key at {m.key}. The old one is kept as {old.name} so this machine
@@ -539,13 +538,13 @@ ferry. Once every machine has synced, delete {m.dir}/identity.old-*.""")
                 self.die(f"{n} keeps its history — only auto repos compact ({' '.join(s.project.auto) or 'none here'})")
         self.begin(s)
         if not s.hub.is_up():
-            self.die(f"hub not reachable at {s.hub.root} — compacting needs every machine's latest")
-        self.ui.hdr(f"pull ← {s.hub.root}")
+            self.die(f"hub not reachable at {s.hub.location} — compacting needs every machine's latest")
+        self.ui.hdr(f"pull ← {s.hub.location}")
         self.ui.said = False
         s.pull()
         if not self.ui.said:
             self.ui.ok("nothing new from other machines")
-        self.ui.hdr(f"compact → {s.hub.root}/{s.host}")
+        self.ui.hdr(f"compact → {s.hub.location}/{s.host}")
         s.force = True
         for n in args or s.project.auto:
             if s.have(n):
@@ -594,7 +593,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         return commands[command](args)
-    except (GitError, CryptoError, HubFormatError, ProjectError) as e:
+    except (GitError, CryptoError, HubFormatError, ProjectError, StoreError) as e:
         run.die(str(e))
     except OSError as e:                    # the share went away mid-run, a full disk, ...
         run.die(f"{e.strerror} — {e.filename}" if e.filename else str(e))

@@ -16,9 +16,10 @@ from pathlib import Path
 
 from ferry import plan, system
 from ferry.crypto import Keyring, generate_key
-from ferry.hub import Hub, HubFormatError, fsig
+from ferry.hub import Hub, HubFormatError
 from ferry.manifest import Epoch, EpochRecord, Manifest, Pack
 from ferry.project import Layout, Project, ProjectError, claude_slug, find
+from ferry.store import FolderStore, Store, StoreError
 from ferry.ui import human
 
 LIB = Path(__file__).resolve().parent.parent / "src" / "ferry"
@@ -241,14 +242,92 @@ class Keys(unittest.TestCase):
             self.assertEqual(Keyring.load(d).open_text(d / "m.age"), "hello")
 
 
+class StoreContract:
+    """What the hub asks of every store. Each kind of store runs these, given
+    an empty hub in self.store."""
+    store: Store
+
+    def put(self, key: str, data: bytes) -> None:
+        with self.store.writing(key) as f:
+            f.write_bytes(data)
+
+    def get(self, key: str) -> bytes:
+        with self.store.reading(key) as f:
+            return f.read_bytes()
+
+    def test_a_file_appears_whole_or_not_at_all(self):
+        self.store.mkdir("a/s")
+        with self.store.writing("a/s/m") as f:
+            f.write_bytes(b"one")
+            self.assertIsNone(self.store.stat("a/s/m"))
+            self.assertEqual(self.store.files("a/s"), set())
+        self.assertEqual(self.get("a/s/m"), b"one")
+        with self.assertRaises(RuntimeError), self.store.writing("a/s/m") as f:
+            f.write_bytes(b"two, cut short")
+            raise RuntimeError
+        self.assertEqual(self.get("a/s/m"), b"one")
+        self.assertEqual(self.store.files("a/s"), {"m"})
+        self.store.clean("a/s")
+        self.assertEqual(self.store.files("a/s"), {"m"})
+
+    def test_what_isnt_there(self):
+        with self.assertRaises(FileNotFoundError):
+            self.get("a/s/m")
+        self.assertIsNone(self.store.stat("a/s/m"))
+        self.assertEqual((self.store.files("a"), self.store.folders("a")), (set(), set()))
+        self.assertFalse(self.store.is_folder("a"))
+        self.store.delete("a/s/m")
+        self.store.delete_folder("a")
+
+    def test_listings(self):
+        self.store.mkdir("a/s")
+        self.store.mkdir("b")
+        self.put("FORMAT", b"f")
+        self.put("a/x", b"x")
+        self.assertEqual(self.store.folders(""), {"a", "b"})
+        self.assertEqual(self.store.files(""), {"FORMAT"})
+        self.assertEqual((self.store.folders("a"), self.store.files("a")), ({"s"}, {"x"}))
+        self.assertTrue(self.store.is_folder("b"), "a folder holding nothing yet")
+        self.assertFalse(self.store.is_folder("a/x"))
+        self.assertIsNotNone(self.store.stat("a/x"))
+
+    def test_delete(self):
+        self.store.mkdir("a/s")
+        self.put("a/s/m", b"m")
+        self.put("a/x", b"x")
+        self.store.delete("a/x")
+        self.assertEqual(self.store.files("a"), set())
+        self.store.delete_folder("a")
+        self.assertFalse(self.store.is_folder("a"))
+        self.assertEqual(self.store.folders(""), set())
+
+    def test_one_claim_wins(self):
+        self.assertTrue(self.store.claim(".lock/owner", b"alpha\n"))
+        self.assertFalse(self.store.claim(".lock/owner", b"beta\n"))
+        self.assertEqual(self.get(".lock/owner"), b"alpha\n")
+        self.store.delete_folder(".lock")
+        self.assertTrue(self.store.claim(".lock/owner", b"beta\n"))
+
+
+class FolderStoreContract(StoreContract, unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = FolderStore(Path(self.tmp.name) / "hub")
+        self.store.mkdir("")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+
 class HubFiles(unittest.TestCase):
     """What a real share adds: a ._ companion beside every file, and mtimes finer
     than a second."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.hub = Hub(Path(self.tmp.name), "alpha", None)
-        self.slot = self.hub.slot("alpha", "source")
+        self.root = Path(self.tmp.name)
+        self.hub = Hub(FolderStore(self.root), "alpha", None)
+        self.slot = self.root / "alpha" / "source"
         self.slot.mkdir(parents=True)
 
     def tearDown(self):
@@ -264,27 +343,41 @@ class HubFiles(unittest.TestCase):
         self.hub.sweep("source", {"a.pack.age"})
         self.assertEqual(sorted(p.name for p in self.slot.iterdir()), ["._a.pack.age", "a.pack.age", "manifest.age"])
 
+    def test_listings_skip_companions(self):
+        (self.root / "._alpha").write_text("")
+        (self.root / ".compacting-source").mkdir()
+        self.assertEqual(self.hub.hosts(), ["alpha"])
+        self.hub.retire("alpha")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [".compacting-source"])
+
+    def test_vacant(self):
+        self.assertIsNone(FolderStore(self.root / "new").check_vacant())
+        with self.assertRaisesRegex(StoreError, "isn't empty"):
+            FolderStore(self.root).check_vacant()
+        with self.assertRaisesRegex(StoreError, "is the share mounted"):
+            FolderStore(self.root / "unmounted" / "hub").check_vacant()
+
     def test_format(self):
         self.assertFalse(self.hub.is_up(), "no FORMAT: the share isn't mounted")
-        (self.hub.root / "FORMAT").write_bytes(b"ferry 9\n")
+        (self.root / "FORMAT").write_bytes(b"ferry 9\n")
         with self.assertRaises(HubFormatError):
             self.hub.is_up()
 
     def test_shared_files_are_lf_on_every_os(self):
         self.hub.create()
-        self.assertEqual((self.hub.root / "FORMAT").read_bytes(), b"ferry 1\n")
+        self.assertEqual((self.root / "FORMAT").read_bytes(), b"ferry 1\n")
         self.assertIsNone(self.hub.take_lock("source"))
-        self.assertEqual((self.hub.root / ".compacting-source" / "owner").read_bytes(), b"alpha\n")
+        self.assertEqual((self.root / ".compacting-source" / "owner").read_bytes(), b"alpha\n")
         self.hub.release_lock("source")
         self.assertFalse(self.hub.lock_held("source"))
 
-    def test_fsig_sees_a_rewrite_within_the_second(self):
+    def test_manifest_sig_sees_a_rewrite_within_the_second(self):
         f = self.slot / "manifest.age"
         f.write_text("x")
         os.utime(f, ns=(1_762_000_000_100_000_000,) * 2)
-        before = fsig(f)
+        before = self.hub.manifest_sig("alpha", "source")
         os.utime(f, ns=(1_762_000_000_600_000_000,) * 2)
-        self.assertNotEqual(fsig(f), before)
+        self.assertNotEqual(self.hub.manifest_sig("alpha", "source"), before)
 
 
 class ThisMachine(unittest.TestCase):

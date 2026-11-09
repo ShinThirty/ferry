@@ -203,8 +203,10 @@ FERRY_TEST_SHARE=DIR uv run python tests/hub_test.py   # the hubs in a folder on
 ```
 
 Only `gitcli` runs git, only `crypto` touches age, and the decisions with no
-I/O in them are in `plan`. The unit tests hold those rules. Every machine
-reads the hub, so a change to its format needs a new `FORMAT`.
+I/O in them are in `plan`. The unit tests hold those rules. Only `store`
+touches the hub's files, and `StoreContract` in the unit tests is what any
+kind of store must do. Every machine reads the hub, so a change to its format
+needs a new `FORMAT`.
 
 ## License
 
