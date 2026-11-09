@@ -457,6 +457,20 @@ class HubFiles(unittest.TestCase):
         self.hub.sweep("source", {"a.pack.age"})
         self.assertEqual(sorted(p.name for p in self.slot.iterdir()), ["._a.pack.age", "a.pack.age", "manifest.age"])
 
+    def test_machines_are_listed_once_a_run(self):
+        (self.root / "beta").mkdir()
+        with mock.patch.object(self.hub.store, "folders", wraps=self.hub.store.folders) as listing:
+            self.assertEqual((self.hub.hosts(), self.hub.others()), (["alpha", "beta"], ["beta"]))
+            self.assertEqual((self.hub.has_host("beta"), self.hub.has_host("gamma")), (True, False))
+            self.assertEqual(listing.call_count, 1)
+            self.hub.retire("beta")
+            self.assertFalse(self.hub.has_host("beta"), "a machine retired here is gone at once")
+        gamma = Hub(self.hub.store, "gamma", None)
+        self.assertEqual(gamma.hosts(), ["alpha"])
+        gamma.join()
+        self.assertEqual(gamma.others(), ["alpha"])
+        self.assertTrue(gamma.has_host("gamma"), "and one joined here is there at once")
+
     def test_listings_skip_companions(self):
         (self.root / "._alpha").write_text("")
         (self.root / ".compacting-source").mkdir()

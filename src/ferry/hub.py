@@ -39,6 +39,7 @@ class Hub:
         self.keys = keys
         self._stamp = time.strftime("%Y%m%d-%H%M%S")
         self._seq = 0
+        self._hosts: set[str] | None = None
 
     @property
     def location(self) -> str:
@@ -73,18 +74,29 @@ class Hub:
         with self.store.writing("FORMAT") as f:
             _write(f, FORMAT + "\n")
 
+    def _listed(self) -> set[str]:
+        """The machines on the hub, listed once a run: every repo asks, and in S3
+        each listing is a request. One that joins or leaves meanwhile from another
+        machine is seen at the next run; this machine's own join and retire are
+        seen at once."""
+        if self._hosts is None:
+            self._hosts = {h for h in self.store.folders("") if not h.startswith(".")}
+        return self._hosts
+
     def hosts(self) -> list[str]:
-        return sorted(h for h in self.store.folders("") if not h.startswith("."))
+        return sorted(self._listed())
 
     def others(self) -> list[str]:
         return [h for h in self.hosts() if h != self.host]
 
     def has_host(self, host: str) -> bool:
-        return self.store.is_folder(host)
+        return host in self._listed()
 
     def join(self) -> None:
         """This machine's place on the hub, made before anything goes in it."""
         self.store.mkdir(self.host)
+        if self._hosts is not None:
+            self._hosts.add(self.host)
 
     def by_recency(self, repo: str) -> list[str]:
         """Machines holding a copy of repo, the latest written first."""
@@ -163,6 +175,8 @@ class Hub:
 
     def retire(self, host: str) -> None:
         self.store.delete_folder(host)
+        if self._hosts is not None:
+            self._hosts.discard(host)
         for lock in self.store.folders(""):
             if lock.startswith(".compacting-") and self._owner(lock) == host:   # a compaction it never finished
                 self._unlock(lock)
