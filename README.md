@@ -160,7 +160,7 @@ hub yet. Once back:
 
 ```sh
 ferry            # pull, then push
-ferry status     # every repo against every other machine
+ferry status     # every repo against every other machine, then a line for each machine
 ```
 
 A fast-forward is the normal case. When a kept repo **diverges** (commits on

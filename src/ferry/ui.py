@@ -14,6 +14,11 @@ from . import system
 
 NORMAL, HOOK, BG = "normal", "hook", "bg"
 
+# How another machine's copy stands against this one: a glyph that reads
+# without colour, and a colour that reads without the glyph.
+SAME, AHEAD, BEHIND, DIVERGED, STALE = "same", "ahead", "behind", "diverged", "stale"
+_STATES = {SAME: ("✓", "grn"), AHEAD: ("↑", "cyn"), BEHIND: ("↓", "ylw"), DIVERGED: ("⇅", "red"), STALE: ("↻", "ylw")}
+
 
 def human(b: int) -> str:
     units = ("B", "KB", "MB", "GB")
@@ -36,8 +41,9 @@ class UI:
     def __init__(self, mode: str = NORMAL):
         self.mode = mode
         self.said = False          # whether anything worth reporting was said
-        self.red, self.grn, self.ylw, self.bld, self.rst = (
-            ("\033[31m", "\033[32m", "\033[33m", "\033[1m", "\033[0m") if system.ansi_colours() else ("",) * 5)
+        self.red, self.grn, self.ylw, self.cyn, self.bld, self.dim, self.rst = (
+            ("\033[31m", "\033[32m", "\033[33m", "\033[36m", "\033[1m", "\033[2m", "\033[0m")
+            if system.ansi_colours() else ("",) * 7)
 
     @staticmethod
     def _out(text: str, *, err: bool = False) -> None:
@@ -84,6 +90,14 @@ class UI:
             raise SystemExit(1)
         self.warn(msg)
         raise SystemExit(0 if self.mode == HOOK else 1)
+
+    def state(self, kind: str, text: str) -> str:
+        """text as one of the states above."""
+        glyph, colour = _STATES[kind]
+        return f"{getattr(self, colour)}{glyph} {text}{self.rst}"
+
+    def faint(self, text: str) -> str:
+        return f"{self.dim}{text}{self.rst}"
 
     def mark(self, text: str) -> str:
         """text, highlighted at a terminal."""

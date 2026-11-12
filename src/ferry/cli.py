@@ -20,7 +20,7 @@ from .hub import Hub, HubFormatError
 from .manifest import EpochRecord
 from .project import ROOT, Layout, Project, ProjectError
 from .store import Store, StoreError, store_at
-from .ui import BG, HOOK, NORMAL, UI, day, human
+from .ui import AHEAD, BEHIND, BG, DIVERGED, HOOK, NORMAL, SAME, STALE, UI, day, human
 
 HELP = """\
 ferry — keep a project's git repos in step across machines through an
@@ -268,6 +268,8 @@ class Run:
             ui.warn("hub not reachable — comparing against what was last fetched")
         w = max(11, *(len(n) + 2 for n in s.project.names))
         pad = " " * (w + 2)
+        machines: dict[str, list[tuple[str, str, str]]] = {}     # host: (state, repo, how far)
+        waiting = []
         if not s.project.syncs_root:
             ui.info(f"{ROOT:<{w}}not synced — it has a remote of its own")
         for n in s.project.names:
@@ -282,6 +284,7 @@ class Run:
             if c := len(g.changes()):
                 line += f"  {c} uncommitted"
             if s.pending(n):
+                waiting.append(n)
                 line += f"  {ui.mark('not on the hub yet')}"
             ui.info(line)
             if s.is_auto(n):
@@ -295,23 +298,55 @@ class Run:
                 for h in s.hub.others() if up else s.seen_hosts(n):
                     f = s.seen_epoch(h, n)
                     if f.is_file() and EpochRecord.load(f).number < rec.number:
-                        ui.info(f"{pad}vs {h}: {ui.mark('still on the history before the last compaction')} — moves across at its next sync")
-            for h in s.ref_hosts(n, b):
+                        machines.setdefault(h, []).append((STALE, n, ""))
+                        ui.info(f"{pad}vs {h}: {ui.state(STALE, 'still on the history before the last compaction')} — moves across at its next sync")
+            hosts = s.ref_hosts(n, b)
+            hw = max(map(len, hosts), default=0) + 1
+            for h in hosts:
                 a, z = g.ahead_behind("HEAD", f"refs/hub/{h}/{b}")
                 if a == z == 0:
-                    state = "same"
+                    kind, far = SAME, ""
                 elif a == 0:
-                    state = f"{z} behind"
+                    kind, far = BEHIND, str(z)
                 elif z == 0:
-                    state = f"{a} ahead"
+                    kind, far = AHEAD, str(a)
                 else:
-                    state = f"{ui.mark('diverged')}: {a} here, {z} there"
-                ui.info(f"{pad}vs {h}: {state}")
+                    kind, far = DIVERGED, f"{a} here, {z} there"
+                machines.setdefault(h, []).append((kind, n, far))
+                text = f"{kind}: {far}" if kind == DIVERGED else f"{far} {kind}".lstrip()
+                ui.info(f"{pad}vs {h + ':':<{hw}} {ui.state(kind, text)}")
         if loose := unignored(s.layout):
             ui.warn(f"root doesn't ignore {', '.join(p + '/' for p in loose)} — a commit there could carry their files")
+        self.machine_lines(s, machines, sorted(set(machines) | set(s.hub.others() if up else ())), waiting)
         ui.info("")
         ui.info(f"last pull: {s.last_pull() or 'never'}")
         return 0
+
+    def machine_lines(self, s: Sync, found: dict[str, list[tuple[str, str, str]]], names: list[str], waiting: list[str]) -> None:
+        """status, turned round: a line for each machine, saying where it stands
+        against this one across every repo."""
+        ui = self.ui
+        ui.hdr("machines")
+        hw = max(map(len, [s.host, *names]))
+        here = ui.faint("this machine")
+        if waiting:
+            here += f"   {ui.mark('not on the hub yet: ' + ', '.join(waiting))}"
+        ui.info(f"  {ui.bld}{s.host:<{hw}}{ui.rst}  {here}")
+        # Said of the machine named, where a repo's "vs" lines are said of this one.
+        words = {DIVERGED: "diverged", BEHIND: "has work to pull", AHEAD: "lacks work from here", STALE: "on the old history"}
+        for h in names:
+            states = found.get(h, [])
+            parts = []
+            for kind, word in words.items():
+                if at := [f"{n} ({far})" if far else n for k, n, far in states if k == kind]:
+                    parts.append(ui.state(kind, f"{word}: {', '.join(at)}"))
+            if not states:
+                parts = [ui.faint("nothing to compare here")]
+            elif not parts:
+                parts = [ui.state(SAME, "same in every repo")]
+            ui.info(f"  {ui.bld}{h:<{hw}}{ui.rst}  {'   '.join(parts)}")
+        if not names:
+            ui.info(f"  {ui.faint('no other machines yet')}")
 
     # --- machines joining and leaving ----------------------------------------
     def cmd_init(self, args: Sequence[str]) -> int:
